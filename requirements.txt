@@ -4,9 +4,7 @@ requests
 faiss-cpu
 numpy
 sentence-transformers
-cross-encoder
-gTTS
+CrossEncoder
 rank-bm25
 nltk
-openai
-google-auth
+gTTS
