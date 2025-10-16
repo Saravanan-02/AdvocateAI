@@ -41,19 +41,61 @@ INDEX_FILE = "faiss_advanced_index.bin"
 METADATA_FILE = "metadata.pkl"
 
 # ==========================
-# GOOGLE DRIVE DOWNLOAD FUNCTION
+# IMPROVED GOOGLE DRIVE DOWNLOAD FUNCTION
 # ==========================
 def download_file_from_drive(file_id, local_path):
-    """Download a file from Google Drive if it doesn't exist locally."""
-    if not os.path.exists(local_path):
-        st.info(f"Downloading {local_path} from Google Drive...")
-        url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        r = requests.get(url)
-        with open(local_path, "wb") as f:
-            f.write(r.content)
-        st.success(f"{local_path} downloaded successfully.")
-    else:
+    """Download a file from Google Drive with proper error handling."""
+    if os.path.exists(local_path):
         st.info(f"{local_path} already exists locally.")
+        return True
+        
+    st.info(f"Downloading {local_path} from Google Drive...")
+    
+    try:
+        # Method 1: Direct download
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        session = requests.Session()
+        
+        # First request to get the confirmation token for large files
+        response = session.get(url, stream=True)
+        response.raise_for_status()
+        
+        # Check if we got an HTML page instead of the file
+        content = response.content
+        if content.startswith(b'<!DOCTYPE html') or content.startswith(b'<html') or b'google.com' in content[:1000]:
+            st.warning("Direct download failed, trying alternative method...")
+            
+            # Method 2: Alternative download URL
+            url = f"https://docs.google.com/uc?export=download&id={file_id}&confirm=t"
+            response = session.get(url, stream=True)
+            response.raise_for_status()
+            
+            content = response.content
+            # Check again if it's HTML
+            if content.startswith(b'<!DOCTYPE html') or content.startswith(b'<html'):
+                st.error("Failed to download file: Google Drive returned HTML instead of file. Please check file permissions.")
+                return False
+        
+        # Save the file
+        with open(local_path, "wb") as f:
+            f.write(content)
+            
+        # Verify the file was downloaded properly
+        file_size = os.path.getsize(local_path)
+        if file_size == 0:
+            st.error(f"Downloaded file is empty: {local_path}")
+            os.remove(local_path)
+            return False
+            
+        st.success(f"{local_path} downloaded successfully ({file_size} bytes)")
+        return True
+        
+    except Exception as e:
+        st.error(f"Error downloading {local_path}: {str(e)}")
+        # Clean up if file was partially downloaded
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        return False
 
 # ==========================
 # CACHED RESOURCE LOADING
@@ -69,18 +111,40 @@ def load_models_and_index():
         meta_file_id = "1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90"   # Metadata file
 
         # Download files if not present
-        download_file_from_drive(faiss_file_id, INDEX_FILE)
-        download_file_from_drive(meta_file_id, METADATA_FILE)
+        faiss_success = download_file_from_drive(faiss_file_id, INDEX_FILE)
+        meta_success = download_file_from_drive(meta_file_id, METADATA_FILE)
+        
+        if not faiss_success or not meta_success:
+            st.error("Failed to download required files from Google Drive.")
+            return embedding_model, reranker_model, None, None
+
+        # Verify files before loading
+        if os.path.getsize(INDEX_FILE) == 0 or os.path.getsize(METADATA_FILE) == 0:
+            st.error("Downloaded files are empty. Please check the file IDs and permissions.")
+            return embedding_model, reranker_model, None, None
 
         # Load FAISS index and metadata
+        st.info("Loading FAISS index and metadata...")
         index = faiss.read_index(INDEX_FILE)
         with open(METADATA_FILE, "rb") as f:
             metadata = pickle.load(f)
             
+        st.success("Knowledge base loaded successfully!")
         return embedding_model, reranker_model, index, metadata
         
     except Exception as e:
         st.error(f"Error loading models and index: {e}")
+        # Clean up corrupted files
+        if os.path.exists(INDEX_FILE):
+            try:
+                os.remove(INDEX_FILE)
+            except:
+                pass
+        if os.path.exists(METADATA_FILE):
+            try:
+                os.remove(METADATA_FILE)
+            except:
+                pass
         return embedding_model, reranker_model, None, None
 
 # ==========================
@@ -372,10 +436,28 @@ def highlight_search_terms(text, search_terms):
 # STREAMLIT APP
 # ==========================
 st.set_page_config(page_title="Advocate AI Optimized", layout="wide")
+
+# Add a startup message
+st.info("🚀 Loading AI models and knowledge base... This may take a few moments.")
+
 embed_model, reranker_model, folder_index, folder_metadata = load_models_and_index()
 
 if folder_index is None:
-    st.error("Knowledge base not found. Run build_index_advanced.py")
+    st.error("""
+    ❌ Knowledge base not found or failed to load. 
+    
+    This could be because:
+    - The Google Drive files are not publicly accessible
+    - The file IDs are incorrect
+    - There's a network issue
+    
+    Please check:
+    1. That the Google Drive files are set to "Anyone with the link can view"
+    2. The file IDs are correct
+    3. Your internet connection
+    
+    Alternatively, you can build the knowledge base locally by running build_index_advanced.py
+    """)
     st.stop()
 
 # Initialize session state
