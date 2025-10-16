@@ -1,0 +1,12 @@
+streamlit
+PyMuPDF
+requests
+faiss-cpu
+numpy
+sentence-transformers
+cross-encoder
+gTTS
+rank-bm25
+nltk
+openai
+google-auth
