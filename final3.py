@@ -41,46 +41,56 @@ INDEX_FILE = "faiss_advanced_index.bin"
 METADATA_FILE = "metadata.pkl"
 
 # ==========================
-# IMPROVED GOOGLE DRIVE DOWNLOAD FUNCTION
+# ROBUST GOOGLE DRIVE DOWNLOAD FUNCTION
 # ==========================
 def download_file_from_drive(file_id, local_path):
-    """Download a file from Google Drive with proper error handling."""
+    """Download a file from Google Drive with robust error handling and confirmation."""
     if os.path.exists(local_path):
-        st.info(f"{local_path} already exists locally.")
-        return True
-        
+        file_size = os.path.getsize(local_path)
+        if file_size > 1000:  # If file exists and has reasonable size
+            st.info(f"{local_path} already exists locally ({file_size} bytes).")
+            return True
+        else:
+            st.warning(f"Existing file {local_path} is too small ({file_size} bytes), re-downloading...")
+            os.remove(local_path)
+    
     st.info(f"Downloading {local_path} from Google Drive...")
     
     try:
-        # Method 1: Direct download
-        url = f"https://drive.google.com/uc?export=download&id={file_id}"
         session = requests.Session()
         
-        # First request to get the confirmation token for large files
+        # First, get the confirmation token
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
         response = session.get(url, stream=True)
         response.raise_for_status()
         
-        # Check if we got an HTML page instead of the file
+        # Check if we need to handle confirmation
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                # This is a large file, need confirmation
+                confirm_token = value
+                url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={confirm_token}"
+                response = session.get(url, stream=True)
+                response.raise_for_status()
+                break
+        
+        # Check if response is HTML (error)
         content = response.content
-        if content.startswith(b'<!DOCTYPE html') or content.startswith(b'<html') or b'google.com' in content[:1000]:
-            st.warning("Direct download failed, trying alternative method...")
-            
-            # Method 2: Alternative download URL
-            url = f"https://docs.google.com/uc?export=download&id={file_id}&confirm=t"
-            response = session.get(url, stream=True)
-            response.raise_for_status()
-            
-            content = response.content
-            # Check again if it's HTML
-            if content.startswith(b'<!DOCTYPE html') or content.startswith(b'<html'):
-                st.error("Failed to download file: Google Drive returned HTML instead of file. Please check file permissions.")
-                return False
+        if b'<!DOCTYPE html' in content[:1000] or b'<html' in content[:1000]:
+            st.error("Google Drive returned HTML instead of file. File may not be publicly accessible.")
+            return False
         
         # Save the file
-        with open(local_path, "wb") as f:
-            f.write(content)
-            
-        # Verify the file was downloaded properly
+        total_size = int(response.headers.get('content-length', 0))
+        block_size = 8192
+        
+        with open(local_path, 'wb') as f:
+            downloaded_size = 0
+            for data in response.iter_content(block_size):
+                downloaded_size += len(data)
+                f.write(data)
+        
+        # Verify download
         file_size = os.path.getsize(local_path)
         if file_size == 0:
             st.error(f"Downloaded file is empty: {local_path}")
@@ -94,7 +104,10 @@ def download_file_from_drive(file_id, local_path):
         st.error(f"Error downloading {local_path}: {str(e)}")
         # Clean up if file was partially downloaded
         if os.path.exists(local_path):
-            os.remove(local_path)
+            try:
+                os.remove(local_path)
+            except:
+                pass
         return False
 
 # ==========================
@@ -111,29 +124,69 @@ def load_models_and_index():
         meta_file_id = "1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90"   # Metadata file
 
         # Download files if not present
-        faiss_success = download_file_from_drive(faiss_file_id, INDEX_FILE)
-        meta_success = download_file_from_drive(meta_file_id, METADATA_FILE)
+        with st.spinner("Downloading FAISS index from Google Drive..."):
+            faiss_success = download_file_from_drive(faiss_file_id, INDEX_FILE)
+        
+        with st.spinner("Downloading metadata from Google Drive..."):
+            meta_success = download_file_from_drive(meta_file_id, METADATA_FILE)
         
         if not faiss_success or not meta_success:
             st.error("Failed to download required files from Google Drive.")
+            # Provide alternative solution
+            st.info("""
+            **Alternative Solutions:**
+            1. **Make sure the Google Drive files are publicly accessible:**
+               - Right-click on each file in Google Drive
+               - Select 'Share' 
+               - Change to 'Anyone with the link can view'
+            2. **Upload files directly to Streamlit:**
+               - Go to your Streamlit app settings
+               - Upload the files in the 'File Manager' section
+            3. **Use different file hosting:**
+               - Upload to GitHub Releases
+               - Use Dropbox with public links
+               - Use AWS S3 with public access
+            """)
             return embedding_model, reranker_model, None, None
 
         # Verify files before loading
-        if os.path.getsize(INDEX_FILE) == 0 or os.path.getsize(METADATA_FILE) == 0:
-            st.error("Downloaded files are empty. Please check the file IDs and permissions.")
+        if os.path.getsize(INDEX_FILE) < 1000 or os.path.getsize(METADATA_FILE) < 100:
+            st.error("Downloaded files are too small. Please check the file IDs and permissions.")
             return embedding_model, reranker_model, None, None
 
         # Load FAISS index and metadata
-        st.info("Loading FAISS index and metadata...")
-        index = faiss.read_index(INDEX_FILE)
-        with open(METADATA_FILE, "rb") as f:
-            metadata = pickle.load(f)
+        with st.spinner("Loading FAISS index..."):
+            index = faiss.read_index(INDEX_FILE)
+        
+        with st.spinner("Loading metadata..."):
+            with open(METADATA_FILE, "rb") as f:
+                metadata = pickle.load(f)
             
-        st.success("Knowledge base loaded successfully!")
+        st.success(f"✅ Knowledge base loaded successfully! ({index.ntotal} chunks)")
         return embedding_model, reranker_model, index, metadata
         
     except Exception as e:
         st.error(f"Error loading models and index: {e}")
+        # Provide detailed troubleshooting
+        st.info("""
+        **Troubleshooting Steps:**
+        
+        1. **Check File Permissions:**
+           - Ensure both files are set to "Anyone with the link can view" in Google Drive
+        
+        2. **Verify File IDs:**
+           - FAISS file ID: `1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg`
+           - Metadata file ID: `1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90`
+        
+        3. **Test Direct Links:**
+           - Open these links in your browser to check if they download the actual files:
+           - https://drive.google.com/uc?export=download&id=1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg
+           - https://drive.google.com/uc?export=download&id=1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90
+        
+        4. **Alternative: Build Locally**
+           - Run `build_index_advanced.py` to create the knowledge base locally
+        """)
+        
         # Clean up corrupted files
         if os.path.exists(INDEX_FILE):
             try:
@@ -446,17 +499,24 @@ if folder_index is None:
     st.error("""
     ❌ Knowledge base not found or failed to load. 
     
-    This could be because:
-    - The Google Drive files are not publicly accessible
-    - The file IDs are incorrect
-    - There's a network issue
+    **Immediate Solutions:**
     
-    Please check:
-    1. That the Google Drive files are set to "Anyone with the link can view"
-    2. The file IDs are correct
-    3. Your internet connection
+    1. **Test the download links directly:**
+       - Open these in your browser to verify they work:
+       - [FAISS Index](https://drive.google.com/uc?export=download&id=1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg)
+       - [Metadata](https://drive.google.com/uc?export=download&id=1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90)
     
-    Alternatively, you can build the knowledge base locally by running build_index_advanced.py
+    2. **Check file permissions:**
+       - Both files must be set to "Anyone with the link can view"
+       - Right-click each file in Google Drive → Share → Change to public
+    
+    3. **Alternative hosting:**
+       - Upload files to GitHub Releases
+       - Use Dropbox with public links
+       - Use AWS S3 with public access
+    
+    4. **Build locally:**
+       - Run `build_index_advanced.py` to create the knowledge base locally
     """)
     st.stop()
 
