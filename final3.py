@@ -41,18 +41,46 @@ INDEX_FILE = "faiss_advanced_index.bin"
 METADATA_FILE = "metadata.pkl"
 
 # ==========================
+# GOOGLE DRIVE DOWNLOAD FUNCTION
+# ==========================
+def download_file_from_drive(file_id, local_path):
+    """Download a file from Google Drive if it doesn't exist locally."""
+    if not os.path.exists(local_path):
+        st.info(f"Downloading {local_path} from Google Drive...")
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        r = requests.get(url)
+        with open(local_path, "wb") as f:
+            f.write(r.content)
+        st.success(f"{local_path} downloaded successfully.")
+    else:
+        st.info(f"{local_path} already exists locally.")
+
+# ==========================
 # CACHED RESOURCE LOADING
 # ==========================
 @st.cache_resource
 def load_models_and_index():
     embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu")
+    
     try:
+        # Google Drive file IDs
+        faiss_file_id = "1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg"  # FAISS index
+        meta_file_id = "1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90"   # Metadata file
+
+        # Download files if not present
+        download_file_from_drive(faiss_file_id, INDEX_FILE)
+        download_file_from_drive(meta_file_id, METADATA_FILE)
+
+        # Load FAISS index and metadata
         index = faiss.read_index(INDEX_FILE)
         with open(METADATA_FILE, "rb") as f:
             metadata = pickle.load(f)
+            
         return embedding_model, reranker_model, index, metadata
-    except FileNotFoundError:
+        
+    except Exception as e:
+        st.error(f"Error loading models and index: {e}")
         return embedding_model, reranker_model, None, None
 
 # ==========================
