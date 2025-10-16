@@ -7,3 +7,4 @@ sentence-transformers
 rank-bm25
 nltk
 gTTS
+gdown
