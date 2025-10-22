@@ -33,7 +33,7 @@ except LookupError:
 # ==========================
 # CONFIG
 # ==========================
-OPENROUTER_API_KEY = "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"
+OPENROUTER_API_KEY = "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"
 GOOGLE_VISION_API_KEY = "AIzaSyBFh_YqGdkvUjQPT6ihyur2mlvETJcOF_k"
 BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -821,3 +821,4 @@ if st.session_state.pending_prompts:
 
         st.session_state.pending_prompts = None
         st.rerun()
+
