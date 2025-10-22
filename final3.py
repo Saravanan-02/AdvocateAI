@@ -51,9 +51,20 @@ def load_models_and_index():
         index = faiss.read_index(INDEX_FILE)
         with open(METADATA_FILE, "rb") as f:
             metadata = pickle.load(f)
+        
+        # Check if metadata itself is None (e.g., corrupt pickle file)
+        if metadata is None:
+            print("Warning: metadata.pkl loaded as None.")
+            return embedding_model, reranker_model, index, None
+
         return embedding_model, reranker_model, index, metadata
     except FileNotFoundError:
+        print("Warning: Index or metadata file not found.")
         return embedding_model, reranker_model, None, None
+    except Exception as e:
+        print(f"Error loading models or index: {e}")
+        return embedding_model, reranker_model, None, None
+
 
 # ==========================
 # RULE-BASED PROMPT GENERATION
@@ -121,7 +132,12 @@ def preprocess_text(text):
     return [w for w in tokens if w not in stop_words]
 
 def bm25_search(query, metadata, top_k=10):
+    # Add check for None metadata
+    if metadata is None:
+        return []
     tokenized_corpus = [preprocess_text(m['text']) for m in metadata]
+    if not tokenized_corpus:
+        return []
     bm25 = BM25Okapi(tokenized_corpus)
     tokenized_query = preprocess_text(query)
     if not tokenized_query:
@@ -152,18 +168,29 @@ def reciprocal_rank_fusion(results_list, k=60):
     return fused_results
 
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
+    # Gracefully handle None metadata, which should be caught by the startup check but good to have
+    if metadata is None or index is None:
+        return "", []
+        
     query_emb = embed_model.encode([query], convert_to_numpy=True)
     distances, indices = index.search(query_emb, top_k * 4)
+    
+    # This line caused the error when metadata was None
     semantic_results = [metadata[idx] for idx in indices[0] if idx < len(metadata)]
+    
     bm25_results = bm25_search(query, metadata, top_k=top_k * 4)
     fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
+    
     pairs = [[query, c["text"]] for c in fused_candidates]
     if not pairs:
         return "", []
+    
     scores = reranker_model.predict(pairs)
     reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
+    
     top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
     sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
+    
     return "\n\n".join(top_chunks), sources
 
 def highlight_keywords(text):
@@ -222,10 +249,18 @@ def process_uploaded_pdfs(uploaded_files, use_ocr=False):
     total_pages = 0
     docs = []
     for pdf in uploaded_files:
-        doc = fitz.open(stream=pdf.read(), filetype="pdf")
-        docs.append({'doc': doc, 'name': pdf.name})
-        total_pages += len(doc)
-    
+        try:
+            doc = fitz.open(stream=pdf.read(), filetype="pdf")
+            docs.append({'doc': doc, 'name': pdf.name})
+            total_pages += len(doc)
+        except Exception as e:
+            st.warning(f"Could not read {pdf.name}: {e}")
+            
+    if total_pages == 0:
+        progress_bar.empty()
+        st.error("No processable PDF pages found.")
+        return ""
+        
     pages_processed = 0
     for item in docs:
         doc = item['doc']
@@ -346,9 +381,16 @@ def highlight_search_terms(text, search_terms):
 st.set_page_config(page_title="Advocate AI Optimized", layout="wide")
 embed_model, reranker_model, folder_index, folder_metadata = load_models_and_index()
 
+# === START FIX 1 ===
+# Updated the checks to be more specific and include a check for folder_metadata.
 if folder_index is None:
-    st.error("Knowledge base not found. Run build_index_advanced.py")
+    st.error("Knowledge base index (faiss_advanced_index.bin) not found. Run build_index_advanced.py")
     st.stop()
+
+if folder_metadata is None:
+    st.error("Knowledge base metadata (metadata.pkl) not found or is corrupt. Run build_index_advanced.py")
+    st.stop()
+# === END FIX 1 ===
 
 # Initialize session state
 if "messages" not in st.session_state: 
@@ -421,8 +463,8 @@ with st.sidebar:
                         with st.popover("⋮"):
                             # Rename option
                             new_name = st.text_input("Rename chat", 
-                                                   value=result['chat_name'], 
-                                                   key=f"rename_{result['chat_id']}")
+                                                    value=result['chat_name'], 
+                                                    key=f"rename_{result['chat_id']}")
                             if st.button("Save", key=f"save_{result['chat_id']}"):
                                 st.session_state.chat_sessions[result['chat_id']]["name"] = new_name
                                 st.rerun()
@@ -477,8 +519,8 @@ with st.sidebar:
                     with st.popover("⋮"):
                         # Rename option
                         new_name = st.text_input("Rename chat", 
-                                               value=session["name"], 
-                                               key=f"rename_{chat_id}")
+                                                value=session["name"], 
+                                                key=f"rename_{chat_id}")
                         if st.button("Save", key=f"save_{chat_id}"):
                             st.session_state.chat_sessions[chat_id]["name"] = new_name
                             st.rerun()
@@ -532,11 +574,14 @@ with st.sidebar:
         "x-ai/grok-code-fast-1",
         "google/gemini-2.5-flash",
         "google/gemini-2.5-flash-lite",
-        "openai/gpt-5-mini"
-        "deepseek/deepseek-r1:free"
-        "qwen/qwen2.5-vl-72b-instruct:free"
-        "mistralai/mistral-small-3.1-24b-instruct:free"
+        "openai/gpt-5-mini",
+        # === START FIX 2 ===
+        # Added a missing comma after "openai/gpt-5-mini"
+        "deepseek/deepseek-r1:free",
+        "qwen/qwen2.5-vl-72b-instruct:free",
+        "mistralai/mistral-small-3.1-24b-instruct:free",
         "meta-llama/llama-4-maverick:free"
+        # === END FIX 2 ===
     ], index=0)
     
     st.success(f"Knowledge Base loaded with {folder_index.ntotal} chunks", icon="✅")
@@ -686,4 +731,3 @@ if st.session_state.pending_prompts:
         
         st.session_state.pending_prompts = None
         st.rerun()
-
