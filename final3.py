@@ -101,7 +101,7 @@ def truncate_text(text, max_words=200):
 # ==========================
 # LLM-BASED SOURCE SUMMARY
 # ==========================
-def summarize_source_with_llm(source_text, model="openai/gpt-5-mini"):
+def summarize_source_with_llm(source_text, model="openai/gpt-3.5-turbo"):
     """
     Summarize a given source text in exactly 2 lines using the selected LLM model.
     """
@@ -392,29 +392,58 @@ def construct_final_prompt(question, rag_summary, uploaded_summary):
     return f"Advocate AI, answer clearly and cite references.\nQ: {question}\nKnowledge: {rag_summary}\nUploaded Docs: {uploaded_summary}"
 
 # ==========================
-# OPENROUTER API CALL
+# OPENROUTER API CALL - FIXED VERSION
 # ==========================
 def call_openrouter(model, prompt):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://yourapp.com",  # Required by OpenRouter
+        "X-Title": "Advocate AI"  # Required by OpenRouter
     }
-    data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    
+    data = {
+        "model": model, 
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 2000,
+        "temperature": 0.7
+    }
 
     try:
-        response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
+        response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data, timeout=60)
         response.raise_for_status()
         result = response.json()
+        
+        if "choices" not in result or len(result["choices"]) == 0:
+            st.error("No response choices returned from OpenRouter")
+            return "Error: No response from model.", 0
+            
         answer = result["choices"][0]["message"]["content"]
         tokens_used = result.get("usage", {}).get("total_tokens", 0)
         return answer, tokens_used
+        
     except requests.exceptions.HTTPError as e:
-        st.error(f"OpenRouter API returned an error: {e}")
-        return "Error: Could not get response from OpenRouter.", 0
+        error_detail = ""
+        try:
+            error_response = response.json()
+            error_detail = f" - {error_response.get('error', {}).get('message', '')}"
+        except:
+            pass
+            
+        st.error(f"OpenRouter API HTTP Error ({response.status_code if 'response' in locals() else 'N/A'}): {e}{error_detail}")
+        return f"Error: Could not get response from OpenRouter. Status: {response.status_code if 'response' in locals() else 'N/A'}", 0
+        
+    except requests.exceptions.Timeout:
+        st.error("OpenRouter API request timed out")
+        return "Error: Request timeout. Please try again.", 0
+        
+    except requests.exceptions.ConnectionError:
+        st.error("OpenRouter API connection error - check your internet connection")
+        return "Error: Connection failed. Please check your internet.", 0
+        
     except Exception as e:
         st.error(f"Unexpected error calling OpenRouter: {e}")
         return "Error: Could not get response from OpenRouter.", 0
-
 
 # ==========================
 # TEXT TO SPEECH
@@ -672,13 +701,13 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     model = st.selectbox("Select Model", [
-        "openai/gpt-5",
-        "anthropic/claude-sonnet-4",
-        "google/gemini-2.5-pro",
-        "x-ai/grok-code-fast-1",
-        "google/gemini-2.5-flash",
-        "google/gemini-2.5-flash-lite",
-        "openai/gpt-5-mini"
+        "openai/gpt-3.5-turbo",
+        "anthropic/claude-3.5-sonnet",
+        "google/gemini-2.0-flash-exp",
+        "meta-llama/llama-3.3-70b-instruct",
+        "google/gemini-2.0-flash-thinking-exp",
+        "anthropic/claude-3-haiku",
+        "mistralai/mistral-7b-instruct"
     ], index=0)
 
     # Show number of chunks if available
@@ -833,5 +862,3 @@ if st.session_state.pending_prompts:
 
         st.session_state.pending_prompts = None
         st.rerun()
-
-
