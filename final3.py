@@ -154,16 +154,31 @@ def reciprocal_rank_fusion(results_list, k=60):
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
     query_emb = embed_model.encode([query], convert_to_numpy=True)
     distances, indices = index.search(query_emb, top_k * 4)
-    semantic_results = [metadata[idx] for idx in indices[0] if idx < len(metadata)]
+    
+    # Safe indexing with bounds checking
+    semantic_results = []
+    for idx in indices[0]:
+        if 0 <= idx < len(metadata):  # Ensure index is within valid range
+            semantic_results.append(metadata[idx])
+    
+    # If no semantic results found, return empty
+    if not semantic_results:
+        return "", []
+    
     bm25_results = bm25_search(query, metadata, top_k=top_k * 4)
     fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
-    pairs = [[query, c["text"]] for c in fused_candidates]
-    if not pairs:
+    
+    # If no fused candidates, return empty
+    if not fused_candidates:
         return "", []
+    
+    pairs = [[query, c["text"]] for c in fused_candidates]
     scores = reranker_model.predict(pairs)
     reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
+    
     top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
     sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
+    
     return "\n\n".join(top_chunks), sources
 
 def highlight_keywords(text):
@@ -682,3 +697,4 @@ if st.session_state.pending_prompts:
         
         st.session_state.pending_prompts = None
         st.rerun()
+
