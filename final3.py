@@ -602,17 +602,18 @@ if "folder_index" not in st.session_state:
     st.session_state.folder_index = None
 if "folder_metadata" not in st.session_state:
     st.session_state.folder_metadata = None
-if "messages" not st.session_state: 
+# --- THIS IS THE CORRECTED BLOCK ---
+if "messages" not in st.session_state: 
     st.session_state.messages = []
-if "pending_prompts" not st.session_state: 
+if "pending_prompts" not in st.session_state: 
     st.session_state.pending_prompts = None
-if "uploaded_pdfs_data" not st.session_state: 
+if "uploaded_pdfs_data" not in st.session_state: 
     st.session_state.uploaded_pdfs_data = None
-if "tokens_used" not st.session_state: 
+if "tokens_used" not in st.session_state: 
     st.session_state.tokens_used = 0
-if "chat_sessions" not st.session_state:
+if "chat_sessions" not in st.session_state:
     st.session_state.chat_sessions = {}
-if "active_chat" not st.session_state:
+if "active_chat" not in st.session_state:
     st.session_state.active_chat = None
 
 # Load knowledge base (not cached)
@@ -1000,3 +1001,4 @@ Question: {choice}
             # 7. Clear pending prompts and rerun
             st.session_state.pending_prompts = None
             st.rerun()
+
