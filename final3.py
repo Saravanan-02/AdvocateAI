@@ -16,6 +16,7 @@ from nltk.corpus import stopwords
 import string
 import base64
 from datetime import datetime
+import io
 
 # ==========================
 # NLTK DATA DOWNLOADS
@@ -41,164 +42,117 @@ INDEX_FILE = "faiss_advanced_index.bin"
 METADATA_FILE = "metadata.pkl"
 
 # ==========================
-# ROBUST GOOGLE DRIVE DOWNLOAD FUNCTION
+# FALLBACK KNOWLEDGE BASE SETUP
 # ==========================
-def download_file_from_drive(file_id, local_path):
-    """Download a file from Google Drive with robust error handling and confirmation."""
-    if os.path.exists(local_path):
-        file_size = os.path.getsize(local_path)
-        if file_size > 1000:  # If file exists and has reasonable size
-            st.info(f"{local_path} already exists locally ({file_size} bytes).")
-            return True
-        else:
-            st.warning(f"Existing file {local_path} is too small ({file_size} bytes), re-downloading...")
-            os.remove(local_path)
+def setup_fallback_knowledge_base():
+    """Create a minimal fallback knowledge base if downloads fail"""
+    st.warning("📁 Setting up minimal fallback knowledge base...")
     
-    st.info(f"Downloading {local_path} from Google Drive...")
+    # Create minimal metadata
+    fallback_metadata = [
+        {
+            'text': 'The Indian Constitution is the supreme law of India. It establishes the framework defining fundamental political principles.',
+            'source': 'Constitution of India'
+        },
+        {
+            'text': 'The Supreme Court of India is the highest judicial court and the final court of appeal under the Constitution of India.',
+            'source': 'Indian Judiciary System'
+        },
+        {
+            'text': 'Fundamental Rights are enshrined in Part III of the Indian Constitution from Articles 12 to 35.',
+            'source': 'Fundamental Rights'
+        },
+        {
+            'text': 'The Code of Civil Procedure, 1908 governs the procedure to be followed in civil courts in India.',
+            'source': 'Civil Procedure Code'
+        },
+        {
+            'text': 'The Indian Penal Code, 1860 is the official criminal code of India which covers all substantive aspects of criminal law.',
+            'source': 'Indian Penal Code'
+        }
+    ]
     
+    # Create minimal embeddings
+    embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+    texts = [item['text'] for item in fallback_metadata]
+    embeddings = embedding_model.encode(texts, convert_to_numpy=True)
+    
+    # Create FAISS index
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatIP(dimension)
+    index.add(embeddings)
+    
+    # Save files locally for future use
     try:
-        session = requests.Session()
-        
-        # First, get the confirmation token
-        url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        response = session.get(url, stream=True)
-        response.raise_for_status()
-        
-        # Check if we need to handle confirmation
-        for key, value in response.cookies.items():
-            if key.startswith('download_warning'):
-                # This is a large file, need confirmation
-                confirm_token = value
-                url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={confirm_token}"
-                response = session.get(url, stream=True)
-                response.raise_for_status()
-                break
-        
-        # Check if response is HTML (error)
-        content = response.content
-        if b'<!DOCTYPE html' in content[:1000] or b'<html' in content[:1000]:
-            st.error("Google Drive returned HTML instead of file. File may not be publicly accessible.")
-            return False
-        
-        # Save the file
-        total_size = int(response.headers.get('content-length', 0))
-        block_size = 8192
-        
-        with open(local_path, 'wb') as f:
-            downloaded_size = 0
-            for data in response.iter_content(block_size):
-                downloaded_size += len(data)
-                f.write(data)
-        
-        # Verify download
-        file_size = os.path.getsize(local_path)
-        if file_size == 0:
-            st.error(f"Downloaded file is empty: {local_path}")
-            os.remove(local_path)
-            return False
-            
-        st.success(f"{local_path} downloaded successfully ({file_size} bytes)")
-        return True
-        
+        faiss.write_index(index, INDEX_FILE)
+        with open(METADATA_FILE, 'wb') as f:
+            pickle.dump(fallback_metadata, f)
+        st.success("✅ Fallback knowledge base created successfully!")
     except Exception as e:
-        st.error(f"Error downloading {local_path}: {str(e)}")
-        # Clean up if file was partially downloaded
-        if os.path.exists(local_path):
-            try:
-                os.remove(local_path)
-            except:
-                pass
-        return False
+        st.warning(f"Could not save fallback files: {e}")
+    
+    return index, fallback_metadata
 
 # ==========================
-# CACHED RESOURCE LOADING
+# ROBUST KNOWLEDGE BASE LOADING
 # ==========================
 @st.cache_resource
 def load_models_and_index():
     embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu")
     
-    try:
-        # Google Drive file IDs
-        faiss_file_id = "1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg"  # FAISS index
-        meta_file_id = "1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90"   # Metadata file
-
-        # Download files if not present
-        with st.spinner("Downloading FAISS index from Google Drive..."):
-            faiss_success = download_file_from_drive(faiss_file_id, INDEX_FILE)
-        
-        with st.spinner("Downloading metadata from Google Drive..."):
-            meta_success = download_file_from_drive(meta_file_id, METADATA_FILE)
-        
-        if not faiss_success or not meta_success:
-            st.error("Failed to download required files from Google Drive.")
-            # Provide alternative solution
-            st.info("""
-            **Alternative Solutions:**
-            1. **Make sure the Google Drive files are publicly accessible:**
-               - Right-click on each file in Google Drive
-               - Select 'Share' 
-               - Change to 'Anyone with the link can view'
-            2. **Upload files directly to Streamlit:**
-               - Go to your Streamlit app settings
-               - Upload the files in the 'File Manager' section
-            3. **Use different file hosting:**
-               - Upload to GitHub Releases
-               - Use Dropbox with public links
-               - Use AWS S3 with public access
-            """)
-            return embedding_model, reranker_model, None, None
-
-        # Verify files before loading
-        if os.path.getsize(INDEX_FILE) < 1000 or os.path.getsize(METADATA_FILE) < 100:
-            st.error("Downloaded files are too small. Please check the file IDs and permissions.")
-            return embedding_model, reranker_model, None, None
-
-        # Load FAISS index and metadata
-        with st.spinner("Loading FAISS index..."):
+    # Try multiple methods to load the knowledge base
+    methods_tried = []
+    
+    # Method 1: Try loading existing local files
+    if os.path.exists(INDEX_FILE) and os.path.exists(METADATA_FILE):
+        try:
             index = faiss.read_index(INDEX_FILE)
-        
-        with st.spinner("Loading metadata..."):
+            with open(METADATA_FILE, "rb") as f:
+                metadata = pickle.load(f)
+            if index.ntotal > 0 and len(metadata) > 0:
+                st.success("✅ Loaded existing knowledge base from local files")
+                return embedding_model, reranker_model, index, metadata
+        except Exception as e:
+            methods_tried.append(f"Local files: {e}")
+    
+    # Method 2: Try manual file upload
+    st.info("📤 Please upload your knowledge base files")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        faiss_file = st.file_uploader("Upload FAISS Index (.bin)", type=['bin'], key="faiss_upload")
+    
+    with col2:
+        meta_file = st.file_uploader("Upload Metadata (.pkl)", type=['pkl'], key="meta_upload")
+    
+    if faiss_file is not None and meta_file is not None:
+        try:
+            # Save uploaded files
+            with open(INDEX_FILE, "wb") as f:
+                f.write(faiss_file.getvalue())
+            
+            with open(METADATA_FILE, "wb") as f:
+                f.write(meta_file.getvalue())
+            
+            # Load the saved files
+            index = faiss.read_index(INDEX_FILE)
             with open(METADATA_FILE, "rb") as f:
                 metadata = pickle.load(f)
             
-        st.success(f"✅ Knowledge base loaded successfully! ({index.ntotal} chunks)")
-        return embedding_model, reranker_model, index, metadata
-        
-    except Exception as e:
-        st.error(f"Error loading models and index: {e}")
-        # Provide detailed troubleshooting
-        st.info("""
-        **Troubleshooting Steps:**
-        
-        1. **Check File Permissions:**
-           - Ensure both files are set to "Anyone with the link can view" in Google Drive
-        
-        2. **Verify File IDs:**
-           - FAISS file ID: `1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg`
-           - Metadata file ID: `1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90`
-        
-        3. **Test Direct Links:**
-           - Open these links in your browser to check if they download the actual files:
-           - https://drive.google.com/uc?export=download&id=1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg
-           - https://drive.google.com/uc?export=download&id=1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90
-        
-        4. **Alternative: Build Locally**
-           - Run `build_index_advanced.py` to create the knowledge base locally
-        """)
-        
-        # Clean up corrupted files
-        if os.path.exists(INDEX_FILE):
-            try:
-                os.remove(INDEX_FILE)
-            except:
-                pass
-        if os.path.exists(METADATA_FILE):
-            try:
-                os.remove(METADATA_FILE)
-            except:
-                pass
-        return embedding_model, reranker_model, None, None
+            st.success("✅ Knowledge base loaded from uploaded files!")
+            return embedding_model, reranker_model, index, metadata
+            
+        except Exception as e:
+            methods_tried.append(f"File upload: {e}")
+            st.error(f"Error loading uploaded files: {e}")
+    
+    # Method 3: Create fallback knowledge base
+    st.warning("🚨 No knowledge base found. Creating minimal fallback...")
+    index, metadata = setup_fallback_knowledge_base()
+    
+    return embedding_model, reranker_model, index, metadata
 
 # ==========================
 # RULE-BASED PROMPT GENERATION
@@ -491,34 +445,9 @@ def highlight_search_terms(text, search_terms):
 st.set_page_config(page_title="Advocate AI Optimized", layout="wide")
 
 # Add a startup message
-st.info("🚀 Loading AI models and knowledge base... This may take a few moments.")
+st.info("🚀 Loading AI models and knowledge base...")
 
 embed_model, reranker_model, folder_index, folder_metadata = load_models_and_index()
-
-if folder_index is None:
-    st.error("""
-    ❌ Knowledge base not found or failed to load. 
-    
-    **Immediate Solutions:**
-    
-    1. **Test the download links directly:**
-       - Open these in your browser to verify they work:
-       - [FAISS Index](https://drive.google.com/uc?export=download&id=1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg)
-       - [Metadata](https://drive.google.com/uc?export=download&id=1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90)
-    
-    2. **Check file permissions:**
-       - Both files must be set to "Anyone with the link can view"
-       - Right-click each file in Google Drive → Share → Change to public
-    
-    3. **Alternative hosting:**
-       - Upload files to GitHub Releases
-       - Use Dropbox with public links
-       - Use AWS S3 with public access
-    
-    4. **Build locally:**
-       - Run `build_index_advanced.py` to create the knowledge base locally
-    """)
-    st.stop()
 
 # Initialize session state
 if "messages" not in st.session_state: 
@@ -533,11 +462,26 @@ if "chat_sessions" not in st.session_state:
     st.session_state.chat_sessions = {}
 if "active_chat" not in st.session_state:
     st.session_state.active_chat = None
+if "knowledge_base_loaded" not in st.session_state:
+    st.session_state.knowledge_base_loaded = folder_index is not None
 
 # ==========================
 # SIDEBAR - REORDERED AS REQUESTED
 # ==========================
 with st.sidebar:
+    # ==========================
+    # KNOWLEDGE BASE STATUS
+    # ==========================
+    if st.session_state.knowledge_base_loaded:
+        if folder_index.ntotal > 5:  # Assuming fallback has 5 items
+            st.success(f"✅ Knowledge Base: {folder_index.ntotal} chunks")
+        else:
+            st.warning(f"⚠️ Fallback KB: {folder_index.ntotal} basic legal concepts")
+    else:
+        st.error("❌ Knowledge Base: Not loaded")
+    
+    st.markdown("---")
+    
     # ==========================
     # FIRST: CHAT HISTORY
     # ==========================
@@ -705,8 +649,6 @@ with st.sidebar:
         "openai/gpt-5-mini"
     ], index=0)
     
-    st.success(f"Knowledge Base loaded with {folder_index.ntotal} chunks", icon="✅")
-    
     # ==========================
     # THIRD: FILE UPLOAD & OCR ENABLE
     # ==========================
@@ -762,6 +704,15 @@ st.markdown("""
     </div>
 </div>
 """, unsafe_allow_html=True)
+
+# Knowledge Base Status Banner
+if folder_index.ntotal <= 5:
+    st.warning("""
+    ⚠️ **Using Fallback Knowledge Base** 
+    - The app is running with basic legal concepts
+    - For full functionality, upload your knowledge base files in the sidebar
+    - You can still upload PDFs and ask legal questions
+    """)
 
 # Display current chat context
 if st.session_state.active_chat and st.session_state.active_chat in st.session_state.chat_sessions:
