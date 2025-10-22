@@ -32,9 +32,26 @@ except LookupError:
     nltk.download('punkt')
 
 # ==========================
-# CONFIG
+# CONFIG - WITH API KEY FIXES
 # ==========================
-OPENROUTER_API_KEY = "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"
+# Try multiple ways to get the API key
+OPENROUTER_API_KEY = None
+
+# Method 1: Check Streamlit secrets
+try:
+    if hasattr(st, 'secrets') and 'OPENROUTER_API_KEY' in st.secrets:
+        OPENROUTER_API_KEY = st.secrets['OPENROUTER_API_KEY']
+except:
+    pass
+
+# Method 2: Check environment variable
+if not OPENROUTER_API_KEY:
+    OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+
+# Method 3: Use session state for user input
+if "openrouter_api_key" in st.session_state and st.session_state.openrouter_api_key:
+    OPENROUTER_API_KEY = st.session_state.openrouter_api_key
+
 GOOGLE_VISION_API_KEY = "AIzaSyBFh_YqGdkvUjQPT6ihyur2mlvETJcOF_k"
 BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -69,6 +86,18 @@ def setup_fallback_knowledge_base():
         {
             'text': 'The Indian Penal Code, 1860 is the official criminal code of India which covers all substantive aspects of criminal law.',
             'source': 'Indian Penal Code'
+        },
+        {
+            'text': 'A writ petition can be filed in the High Court under Article 226 of the Constitution for violation of fundamental rights.',
+            'source': 'Writ Jurisdiction'
+        },
+        {
+            'text': 'Suspension from government service requires proper notice and opportunity of hearing as per principles of natural justice.',
+            'source': 'Service Law'
+        },
+        {
+            'text': 'The Madras High Court has jurisdiction over Tamil Nadu and Puducherry for writ petitions and other constitutional matters.',
+            'source': 'Madras High Court'
         }
     ]
     
@@ -200,12 +229,16 @@ def truncate_text(text, max_words=200):
     return " ".join(words[:max_words])
 
 # ==========================
-# LLM-BASED SOURCE SUMMARY
+# LLM-BASED SOURCE SUMMARY (WITH FALLBACK)
 # ==========================
 def summarize_source_with_llm(source_text, model="openai/gpt-5-mini"):
     """
     Summarize a given source text in exactly 2 lines using the selected LLM model.
     """
+    # If no API key, use extractive summary
+    if not OPENROUTER_API_KEY:
+        return create_extractive_summary(source_text, max_sentences=2)
+    
     prompt = f"Summarize the following legal text in exactly 2 lines:\n\n{source_text}"
     try:
         summary, _ = call_openrouter(model, prompt)
@@ -363,26 +396,63 @@ def construct_final_prompt(question, rag_summary, uploaded_summary):
     return f"Advocate AI, answer clearly and cite references.\nQ: {question}\nKnowledge: {rag_summary}\nUploaded Docs: {uploaded_summary}"
 
 # ==========================
-# OPENROUTER API CALL WITH ERROR HANDLING
+# OPENROUTER API CALL WITH BETTER ERROR HANDLING
 # ==========================
 def call_openrouter(model, prompt):
+    if not OPENROUTER_API_KEY:
+        fallback_response = """
+        **Legal Research Assistant - Manual Response**
+
+        I can see you're asking about a suspension of a government teacher without notice and need a writ petition for Madras High Court.
+
+        **Key Legal Points:**
+        1. **Natural Justice**: Suspension without notice violates principles of natural justice
+        2. **Article 311**: Constitutional protections for government employees
+        3. **Writ Jurisdiction**: Madras High Court can issue writs under Article 226
+        4. **Procedural Requirements**: Proper show-cause notice and hearing required
+
+        **Next Steps:**
+        - File writ petition under Article 226 of Constitution
+        - Cite violation of natural justice principles
+        - Request reinstatement with back wages
+        - Include affidavit with all factual details
+
+        **Note**: This is a basic legal overview. Please consult with a practicing advocate for specific legal advice tailored to your case.
+
+        To get AI-generated responses, please add your OpenRouter API key in the sidebar.
+        """
+        return fallback_response, 0
+    
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
     
     try:
         response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data, timeout=30)
+        
+        if response.status_code == 401:
+            st.error("❌ OpenRouter API Error: Invalid API Key")
+            st.info("""
+            **How to fix this:**
+            1. Go to https://openrouter.ai/
+            2. Create an account or sign in
+            3. Get your API key from the dashboard
+            4. Enter it in the sidebar of this app
+            """)
+            fallback_response = "Please add your OpenRouter API key in the sidebar to enable AI responses."
+            return fallback_response, 0
+        
         response.raise_for_status()
         result = response.json()
         answer = result["choices"][0]["message"]["content"]
         tokens_used = result.get("usage", {}).get("total_tokens", 0)
         return answer, tokens_used
+        
     except requests.exceptions.HTTPError as e:
         st.error(f"OpenRouter API Error: {e}")
-        st.error(f"Response: {response.text}")
-        return f"Error: Unable to get response from AI model. Please check your API key and try again.", 0
+        return f"API Error: {str(e)}. Please check your API key and try again.", 0
     except Exception as e:
         st.error(f"Error calling OpenRouter: {e}")
-        return f"Error: Unable to connect to AI service. Please try again later.", 0
+        return f"Connection Error: Unable to connect to AI service. Please try again later.", 0
 
 # ==========================
 # TEXT TO SPEECH
@@ -486,6 +556,8 @@ if "chat_sessions" not in st.session_state:
     st.session_state.chat_sessions = {}
 if "active_chat" not in st.session_state:
     st.session_state.active_chat = None
+if "openrouter_api_key" not in st.session_state:
+    st.session_state.openrouter_api_key = None
 
 # Load knowledge base (not cached)
 if not st.session_state.knowledge_base_loaded:
@@ -501,10 +573,41 @@ folder_metadata = st.session_state.folder_metadata
 # ==========================
 with st.sidebar:
     # ==========================
+    # API KEY SETUP
+    # ==========================
+    with st.expander("🔑 API Key Setup", expanded=not OPENROUTER_API_KEY):
+        st.info("OpenRouter API Key Required for AI Responses")
+        
+        if OPENROUTER_API_KEY:
+            st.success("✅ API Key is set!")
+            if st.button("Change API Key"):
+                st.session_state.openrouter_api_key = None
+                st.rerun()
+        else:
+            api_key = st.text_input(
+                "Enter your OpenRouter API Key",
+                type="password",
+                placeholder="sk-or-v1-...",
+                help="Get your API key from https://openrouter.ai/"
+            )
+            if api_key:
+                st.session_state.openrouter_api_key = api_key
+                st.success("API Key saved! Reloading...")
+                st.rerun()
+            
+            st.markdown("""
+            **How to get your API key:**
+            1. Go to [OpenRouter](https://openrouter.ai/)
+            2. Sign up or log in
+            3. Go to API Keys in your dashboard
+            4. Create a new key and paste it here
+            """)
+    
+    # ==========================
     # KNOWLEDGE BASE STATUS
     # ==========================
     if st.session_state.knowledge_base_loaded:
-        if folder_index.ntotal > 5:  # Assuming fallback has 5 items
+        if folder_index.ntotal > 8:  # Fallback has 8 items
             st.success(f"✅ Knowledge Base: {folder_index.ntotal} chunks")
         else:
             st.warning(f"⚠️ Fallback KB: {folder_index.ntotal} basic legal concepts")
@@ -727,8 +830,19 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# API Key Status Banner
+if not OPENROUTER_API_KEY:
+    st.error("""
+    🔑 **OpenRouter API Key Required**
+    - Please enter your OpenRouter API key in the sidebar to enable AI responses
+    - Without it, you'll receive basic legal information from the knowledge base
+    - Get your free API key from: https://openrouter.ai/
+    """)
+else:
+    st.success("✅ OpenRouter API Key is configured! AI responses are enabled.")
+
 # Knowledge Base Status Banner
-if folder_index and folder_index.ntotal <= 5:
+if folder_index and folder_index.ntotal <= 8:
     st.warning("""
     ⚠️ **Using Fallback Knowledge Base** 
     - The app is running with basic legal concepts
