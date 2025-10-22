@@ -45,29 +45,25 @@ METADATA_FILE = "metadata.pkl"
 # ==========================
 @st.cache_resource
 def load_models_and_index():
-    # load embedding + reranker (CPU by default)
     embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu")
     try:
         index = faiss.read_index(INDEX_FILE)
     except Exception:
         index = None
-
     try:
         with open(METADATA_FILE, "rb") as f:
             metadata = pickle.load(f)
     except Exception:
         metadata = None
-
     return embedding_model, reranker_model, index, metadata
 
 # ==========================
-# RULE-BASED PROMPT GENERATION
+# PROMPT GENERATION
 # ==========================
 def dynamic_query_generator(question):
     base_prompt = question.strip()
     variations = [base_prompt]
-
     if base_prompt.lower().startswith("how to"):
         variations.append(f"Steps for {base_prompt[7:]}")
         variations.append(f"Guide to {base_prompt[7:]}")
@@ -80,7 +76,7 @@ def dynamic_query_generator(question):
     return list(set(variations))
 
 # ==========================
-# LIGHTWEIGHT SUMMARIZATION
+# SUMMARIZATION
 # ==========================
 def create_extractive_summary(text, max_sentences=5):
     if not text:
@@ -98,24 +94,17 @@ def truncate_text(text, max_words=200):
     words = text.split()
     return " ".join(words[:max_words])
 
-# ==========================
-# LLM-BASED SOURCE SUMMARY
-# ==========================
 def summarize_source_with_llm(source_text, model="openai/gpt-5-mini"):
-    """
-    Summarize a given source text in exactly 2 lines using the selected LLM model.
-    """
     prompt = f"Summarize the following legal text in exactly 2 lines:\n\n{source_text}"
     try:
         summary, _ = call_openrouter(model, prompt)
-        summary = " ".join(summary.strip().splitlines())
-        return summary
+        return " ".join(summary.strip().splitlines())
     except Exception as e:
         print(f"LLM summary error: {e}")
         return create_extractive_summary(source_text, max_sentences=2)
 
 # ==========================
-# HYBRID SEARCH
+# TEXT PREPROCESSING & SEARCH
 # ==========================
 def preprocess_text(text):
     if not text:
@@ -129,7 +118,6 @@ def preprocess_text(text):
 def bm25_search(query, metadata, top_k=10):
     if not metadata:
         return []
-    # Ensure metadata items have text
     tokenized_corpus = [preprocess_text(m.get('text', '')) for m in metadata]
     if not any(tokenized_corpus):
         return []
@@ -141,7 +129,6 @@ def bm25_search(query, metadata, top_k=10):
     ranked_indices = np.argsort(scores)[::-1]
     results = []
     for idx in ranked_indices[:top_k]:
-        # Guard against missing fields
         m = metadata[idx]
         results.append({
             'source': m.get('source', f"doc_{idx}"),
@@ -157,7 +144,6 @@ def reciprocal_rank_fusion(results_list, k=60):
         if not results:
             continue
         for rank, item in enumerate(results):
-            # Create an id using source + snippet (safe fallback)
             doc_id = item.get('source', '') + '_' + (item.get('text', '')[:120])
             fused_ranks[doc_id] = fused_ranks.get(doc_id, 0) + 1 / (k + rank)
             unique_items[doc_id] = item
@@ -166,55 +152,33 @@ def reciprocal_rank_fusion(results_list, k=60):
     return fused_results
 
 def _is_faiss_index(obj):
-    """Heuristic to detect FAISS index-like objects."""
     if obj is None:
         return False
-    # many FAISS indexes have attributes/methods like 'ntotal' and 'search'
     return hasattr(obj, "search") and hasattr(obj, "ntotal")
 
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
-    """
-    Robust retrieve + rerank. This function will:
-    - detect and auto-correct swapped index/metadata args
-    - handle missing/empty index or metadata gracefully
-    - protect against unexpected shapes returned by index.search
-    """
-    # -- Defensive argument correction --
-    # If metadata looks like a FAISS index, and index looks like metadata -> swap
     if _is_faiss_index(metadata) and not _is_faiss_index(index):
-        st.warning("Swapped arguments detected: 'metadata' appears to be a FAISS index. Auto-correcting.")
+        st.warning("Swapped arguments detected: auto-correcting.")
         index, metadata = metadata, index
-
-    # If index is missing or not faiss-like -> can't do semantic search
     if index is None or not _is_faiss_index(index):
-        st.warning("FAISS index is not available or invalid. Returning bm25-only results (if metadata present).")
-        # fallback to BM25 only
+        st.warning("FAISS index unavailable. Using BM25 only.")
         bm25_results = bm25_search(query, metadata or [], top_k=top_k)
         top_chunks = [truncate_text(r['text'], max_words=200) for r in bm25_results[:top_k]]
         sources = [{"text": r['text'], "source": r['source']} for r in bm25_results[:top_k]]
         return "\n\n".join(top_chunks), sources
 
-    # Ensure metadata is list-like
     if metadata is None:
         metadata = []
-    if not isinstance(metadata, (list, tuple)):
-        # if metadata is a dict with numeric keys or mapping of ids -> dict, try to convert
-        if isinstance(metadata, dict):
-            metadata = list(metadata.values())
-        else:
-            # unknown metadata type -> set to empty list
-            metadata = []
+    elif isinstance(metadata, dict):
+        metadata = list(metadata.values())
 
-    # Compute embedding
     try:
         query_emb = embed_model.encode([query], convert_to_numpy=True)
     except Exception as e:
         st.error(f"Error encoding query: {e}")
         return "", []
 
-    # Search FAISS index
     try:
-        # top_k * 4 as candidate pool (same as original)
         candidate_k = max(1, top_k * 4)
         distances, indices = index.search(query_emb, candidate_k)
     except Exception as e:
@@ -224,188 +188,132 @@ def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top
         sources = [{"text": r['text'], "source": r['source']} for r in bm25_results[:top_k]]
         return "\n\n".join(top_chunks), sources
 
-    # Normalize indices to a Python sequence of ints
-    # indices could be shape (1, N) or (N,) etc. Ensure we iterate safely.
-    try:
-        if isinstance(indices, np.ndarray):
-            if indices.ndim == 2:
-                idx_list = indices[0].tolist()
-            else:
-                idx_list = indices.tolist()
-        elif isinstance(indices, (list, tuple)):
-            # possibly list of lists
-            if len(indices) > 0 and isinstance(indices[0], (list, np.ndarray)):
-                if isinstance(indices[0], np.ndarray):
-                    idx_list = indices[0].tolist()
-                else:
-                    idx_list = list(indices[0])
-            else:
-                idx_list = list(indices)
-        else:
-            # unexpected type: try to iterate
-            idx_list = list(indices)
-    except Exception:
-        idx_list = []
+    idx_list = []
+    if isinstance(indices, np.ndarray):
+        idx_list = indices[0].tolist() if indices.ndim == 2 else indices.tolist()
+    elif isinstance(indices, (list, tuple)):
+        idx_list = list(indices[0]) if isinstance(indices[0], (list, np.ndarray)) else list(indices)
 
-    # Safe indexing with bounds checking
     semantic_results = []
     for idx in idx_list:
         try:
-            # some faiss indexes return -1 for empty slots — ignore
             if idx is None or idx < 0:
                 continue
-            # idx may be numpy scalar; convert to int
             idx_int = int(idx)
             if 0 <= idx_int < len(metadata):
-                semantic_results.append({
-                    'source': metadata[idx_int].get('source', f"doc_{idx_int}"),
-                    'text': metadata[idx_int].get('text', '')
-                })
+                semantic_results.append({'source': metadata[idx_int].get('source', f"doc_{idx_int}"),
+                                         'text': metadata[idx_int].get('text', '')})
         except Exception:
             continue
 
-    # If no semantic results found, fallback to BM25-only
     if not semantic_results:
         bm25_results = bm25_search(query, metadata, top_k=top_k)
         top_chunks = [truncate_text(r['text'], max_words=200) for r in bm25_results[:top_k]]
         sources = [{"text": r['text'], "source": r['source']} for r in bm25_results[:top_k]]
         return "\n\n".join(top_chunks), sources
 
-    # BM25 candidates
     bm25_results = bm25_search(query, metadata, top_k=top_k * 4)
-    # fused_candidates expects list of dicts with 'source' and 'text'
     fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
 
     if not fused_candidates:
-        # as a final safety, return top semantic_results
         top_chunks = [truncate_text(s['text'], max_words=200) for s in semantic_results[:top_k]]
         sources = [{"text": s['text'], "source": s['source']} for s in semantic_results[:top_k]]
         return "\n\n".join(top_chunks), sources
 
-    # Prepare pairs for reranker (query, candidate_text)
     pairs = [[query, c.get("text", "")] for c in fused_candidates]
     try:
         scores = reranker_model.predict(pairs)
     except Exception as e:
-        st.warning(f"Reranker error: {e}. Returning fused candidates without reranking.")
-        scores = np.arange(len(fused_candidates))[::-1]  # fallback scores to preserve order
+        st.warning(f"Reranker error: {e}. Using fused order.")
+        scores = np.arange(len(fused_candidates))[::-1]
 
-    # zip candidates with scores and sort (descending score)
-    try:
-        reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
-    except Exception:
-        # if sorting fails, fallback to first top_k fused_candidates
-        reranked = [(c, 0.0) for c in fused_candidates[:top_k]]
+    reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
 
     top_chunks = [truncate_text(item[0].get("text", ""), max_words=200) for item in reranked]
     sources = [{"text": item[0].get("text", ""), "source": item[0].get("source", "")} for item in reranked]
 
     return "\n\n".join(top_chunks), sources
 
+# ==========================
+# HIGHLIGHTING
+# ==========================
 def highlight_keywords(text):
-    text = re.sub(r'\b([A-Z][a-z]+)\b', r'**\1**', text)  # Names
-    text = re.sub(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', r'**\1**', text)  # Dates
-    text = re.sub(r'\b\d+\b', r'**\g<0>**', text)  # Numbers
+    text = re.sub(r'\b([A-Z][a-z]+)\b', r'**\1**', text)
+    text = re.sub(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', r'**\1**', text)
+    text = re.sub(r'\b\d+\b', r'**\g<0>**', text)
     return text
 
-# ==================================
-# GOOGLE VISION OCR FUNCTION
-# ==================================
+# ==========================
+# OCR + PDF PROCESSING
+# ==========================
 def ocr_page_with_google_vision(page):
-    """
-    Performs OCR on a single PDF page using Google Cloud Vision API.
-    """
     pix = page.get_pixmap()
     img_bytes = pix.tobytes("png")
     b64_image = base64.b64encode(img_bytes).decode('utf-8')
-
-    payload = {
-        "requests": [{
-            "image": {"content": b64_image},
-            "features": [{"type": "DOCUMENT_TEXT_DETECTION"}]
-        }]
-    }
-
+    payload = {"requests": [{"image": {"content": b64_image}, "features": [{"type": "DOCUMENT_TEXT_DETECTION"}]}]}
     url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
     headers = {"Content-Type": "application/json; charset=utf-8"}
-
     try:
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         result = response.json()
-
         if 'error' in result['responses'][0]:
             st.error(f"Google Vision API Error: {result['responses'][0]['error']['message']}")
             return ""
-
-        if 'fullTextAnnotation' in result['responses'][0]:
-            return result['responses'][0]['fullTextAnnotation']['text']
-        else:
-            return ""  # No text found
+        return result['responses'][0].get('fullTextAnnotation', {}).get('text', "")
     except requests.exceptions.RequestException as e:
-        st.error(f"Error calling Google Vision API: {e}")
+        st.error(f"Google Vision API request error: {e}")
         return ""
 
-# ======================================
-# PDF LOADER WITH OCR
-# ======================================
 def process_uploaded_pdfs(uploaded_files, use_ocr=False):
     all_text = []
     if not uploaded_files:
         return ""
-
     progress_bar = st.progress(0, text="Processing PDFs...")
-    total_pages = 0
-    docs = []
+    total_pages = sum(len(fitz.open(stream=f.read(), filetype="pdf")) for f in uploaded_files)
+    pages_processed = 0
     for pdf in uploaded_files:
         doc = fitz.open(stream=pdf.read(), filetype="pdf")
-        docs.append({'doc': doc, 'name': pdf.name})
-        total_pages += len(doc)
-
-    pages_processed = 0
-    for item in docs:
-        doc = item['doc']
-        pdf_name = item['name']
         for i, page in enumerate(doc):
             text = page.get_text()
-            # If OCR is enabled and the page has very little text, assume it's an image
             if use_ocr and len(text.strip()) < 50:
-                with st.spinner(f"Running OCR on page {i+1} of '{pdf_name}'..."):
-                    ocr_text = ocr_page_with_google_vision(page)
-                all_text.append(ocr_text)
-            else:
-                all_text.append(text)
-
+                with st.spinner(f"Running OCR on page {i+1} of '{pdf.name}'..."):
+                    text = ocr_page_with_google_vision(page)
+            all_text.append(text)
             pages_processed += 1
             progress_bar.progress(pages_processed / total_pages, text=f"Processing page {pages_processed}/{total_pages}...")
-
     progress_bar.empty()
     return "\n".join(all_text)
 
 # ==========================
-# PROMPT CONSTRUCTION (LIMIT KNOWLEDGE TO 3 LINES)
+# PROMPT & OPENROUTER API
 # ==========================
 def construct_final_prompt(question, rag_summary, uploaded_summary):
-    rag_lines = rag_summary.strip().splitlines()
-    rag_summary = " ".join(rag_lines[:3])  # keep only first 3 lines
+    rag_summary = " ".join(rag_summary.strip().splitlines()[:3])
     uploaded_summary = truncate_text(uploaded_summary, max_words=200)
     return f"Advocate AI, answer clearly and cite references.\nQ: {question}\nKnowledge: {rag_summary}\nUploaded Docs: {uploaded_summary}"
 
-# ==========================
-# OPENROUTER API CALL
-# ==========================
 def call_openrouter(model, prompt):
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-    response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
-    response.raise_for_status()
+    try:
+        response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as http_err:
+        print("HTTP error occurred:", http_err)
+        print("Status code:", response.status_code)
+        print("Response body:", response.text)
+        raise Exception(f"OpenRouter API request failed. Status: {response.status_code}, Response: {response.text}") from http_err
+    except requests.exceptions.RequestException as req_err:
+        print("Request exception:", req_err)
+        raise Exception(f"OpenRouter API request error: {req_err}") from req_err
     result = response.json()
     answer = result["choices"][0]["message"]["content"]
     tokens_used = result.get("usage", {}).get("total_tokens", 0)
     return answer, tokens_used
 
 # ==========================
-# TEXT TO SPEECH
+# TEXT-TO-SPEECH
 # ==========================
 def text_to_audio(text):
     try:
@@ -821,3 +729,4 @@ if st.session_state.pending_prompts:
 
         st.session_state.pending_prompts = None
         st.rerun()
+
