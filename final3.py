@@ -94,17 +94,21 @@ def setup_fallback_knowledge_base():
     return index, fallback_metadata
 
 # ==========================
-# ROBUST KNOWLEDGE BASE LOADING
+# LOAD MODELS (CACHED)
 # ==========================
 @st.cache_resource
-def load_models_and_index():
+def load_models():
+    """Load only the AI models (cached)"""
     embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu")
-    
-    # Try multiple methods to load the knowledge base
-    methods_tried = []
-    
-    # Method 1: Try loading existing local files
+    return embedding_model, reranker_model
+
+# ==========================
+# LOAD KNOWLEDGE BASE (NOT CACHED)
+# ==========================
+def load_knowledge_base():
+    """Load knowledge base files"""
+    # Try loading existing local files first
     if os.path.exists(INDEX_FILE) and os.path.exists(METADATA_FILE):
         try:
             index = faiss.read_index(INDEX_FILE)
@@ -112,47 +116,51 @@ def load_models_and_index():
                 metadata = pickle.load(f)
             if index.ntotal > 0 and len(metadata) > 0:
                 st.success("✅ Loaded existing knowledge base from local files")
-                return embedding_model, reranker_model, index, metadata
+                return index, metadata
         except Exception as e:
-            methods_tried.append(f"Local files: {e}")
+            st.warning(f"Could not load local files: {e}")
     
-    # Method 2: Try manual file upload
-    st.info("📤 Please upload your knowledge base files")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        faiss_file = st.file_uploader("Upload FAISS Index (.bin)", type=['bin'], key="faiss_upload")
-    
-    with col2:
-        meta_file = st.file_uploader("Upload Metadata (.pkl)", type=['pkl'], key="meta_upload")
-    
-    if faiss_file is not None and meta_file is not None:
-        try:
-            # Save uploaded files
-            with open(INDEX_FILE, "wb") as f:
-                f.write(faiss_file.getvalue())
-            
-            with open(METADATA_FILE, "wb") as f:
-                f.write(meta_file.getvalue())
-            
-            # Load the saved files
-            index = faiss.read_index(INDEX_FILE)
-            with open(METADATA_FILE, "rb") as f:
-                metadata = pickle.load(f)
-            
-            st.success("✅ Knowledge base loaded from uploaded files!")
-            return embedding_model, reranker_model, index, metadata
-            
-        except Exception as e:
-            methods_tried.append(f"File upload: {e}")
-            st.error(f"Error loading uploaded files: {e}")
-    
-    # Method 3: Create fallback knowledge base
+    # Create fallback knowledge base
     st.warning("🚨 No knowledge base found. Creating minimal fallback...")
     index, metadata = setup_fallback_knowledge_base()
     
-    return embedding_model, reranker_model, index, metadata
+    return index, metadata
+
+# ==========================
+# HANDLE FILE UPLOADS
+# ==========================
+def handle_file_uploads():
+    """Handle file uploads for knowledge base"""
+    st.info("📤 Upload your knowledge base files (optional)")
+    
+    col1, col2 = st.columns(2)
+    
+    uploaded_faiss = None
+    uploaded_meta = None
+    
+    with col1:
+        uploaded_faiss = st.file_uploader("Upload FAISS Index (.bin)", type=['bin'], key="faiss_upload")
+    
+    with col2:
+        uploaded_meta = st.file_uploader("Upload Metadata (.pkl)", type=['pkl'], key="meta_upload")
+    
+    if uploaded_faiss is not None and uploaded_meta is not None:
+        if st.button("💾 Save Uploaded Files", use_container_width=True):
+            try:
+                # Save uploaded files
+                with open(INDEX_FILE, "wb") as f:
+                    f.write(uploaded_faiss.getvalue())
+                
+                with open(METADATA_FILE, "wb") as f:
+                    f.write(uploaded_meta.getvalue())
+                
+                st.success("✅ Knowledge base files saved successfully!")
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"Error saving uploaded files: {e}")
+    
+    return uploaded_faiss, uploaded_meta
 
 # ==========================
 # RULE-BASED PROMPT GENERATION
@@ -355,17 +363,26 @@ def construct_final_prompt(question, rag_summary, uploaded_summary):
     return f"Advocate AI, answer clearly and cite references.\nQ: {question}\nKnowledge: {rag_summary}\nUploaded Docs: {uploaded_summary}"
 
 # ==========================
-# OPENROUTER API CALL
+# OPENROUTER API CALL WITH ERROR HANDLING
 # ==========================
 def call_openrouter(model, prompt):
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-    response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
-    response.raise_for_status()
-    result = response.json()
-    answer = result["choices"][0]["message"]["content"]
-    tokens_used = result.get("usage", {}).get("total_tokens", 0)
-    return answer, tokens_used
+    
+    try:
+        response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        answer = result["choices"][0]["message"]["content"]
+        tokens_used = result.get("usage", {}).get("total_tokens", 0)
+        return answer, tokens_used
+    except requests.exceptions.HTTPError as e:
+        st.error(f"OpenRouter API Error: {e}")
+        st.error(f"Response: {response.text}")
+        return f"Error: Unable to get response from AI model. Please check your API key and try again.", 0
+    except Exception as e:
+        st.error(f"Error calling OpenRouter: {e}")
+        return f"Error: Unable to connect to AI service. Please try again later.", 0
 
 # ==========================
 # TEXT TO SPEECH
@@ -447,9 +464,16 @@ st.set_page_config(page_title="Advocate AI Optimized", layout="wide")
 # Add a startup message
 st.info("🚀 Loading AI models and knowledge base...")
 
-embed_model, reranker_model, folder_index, folder_metadata = load_models_and_index()
+# Load AI models (cached)
+embed_model, reranker_model = load_models()
 
 # Initialize session state
+if "knowledge_base_loaded" not in st.session_state:
+    st.session_state.knowledge_base_loaded = False
+if "folder_index" not in st.session_state:
+    st.session_state.folder_index = None
+if "folder_metadata" not in st.session_state:
+    st.session_state.folder_metadata = None
 if "messages" not in st.session_state: 
     st.session_state.messages = []
 if "pending_prompts" not in st.session_state: 
@@ -462,11 +486,18 @@ if "chat_sessions" not in st.session_state:
     st.session_state.chat_sessions = {}
 if "active_chat" not in st.session_state:
     st.session_state.active_chat = None
-if "knowledge_base_loaded" not in st.session_state:
-    st.session_state.knowledge_base_loaded = folder_index is not None
+
+# Load knowledge base (not cached)
+if not st.session_state.knowledge_base_loaded:
+    with st.spinner("Loading knowledge base..."):
+        st.session_state.folder_index, st.session_state.folder_metadata = load_knowledge_base()
+        st.session_state.knowledge_base_loaded = True
+
+folder_index = st.session_state.folder_index
+folder_metadata = st.session_state.folder_metadata
 
 # ==========================
-# SIDEBAR - REORDERED AS REQUESTED
+# SIDEBAR
 # ==========================
 with st.sidebar:
     # ==========================
@@ -480,10 +511,16 @@ with st.sidebar:
     else:
         st.error("❌ Knowledge Base: Not loaded")
     
+    # ==========================
+    # KNOWLEDGE BASE UPLOAD SECTION
+    # ==========================
+    with st.expander("📁 Upload Knowledge Base", expanded=False):
+        handle_file_uploads()
+    
     st.markdown("---")
     
     # ==========================
-    # FIRST: CHAT HISTORY
+    # CHAT HISTORY
     # ==========================
     st.header("💬 Chat History")
 
@@ -510,21 +547,17 @@ with st.sidebar:
             
             for result in search_results:
                 with st.container():
-                    # Chat header with match count
                     st.markdown(f"**{result['chat_name']}** ({result['total_matches']} matches)")
                     
-                    # Display matches with context
-                    for match in result['matches'][:3]:  # Show max 3 matches per chat
+                    for match in result['matches'][:3]:
                         if match['type'] == 'chat_name':
                             st.caption("📁 Chat name:")
                         else:
                             role_icon = "👤" if match['role'] == 'user' else "🤖"
                             st.caption(f"{role_icon} Message:")
                         
-                        # Display highlighted content
                         st.markdown(f"`{match['highlighted']}`")
                     
-                    # Action buttons for the chat
                     col1, col2 = st.columns([3, 1])
                     with col1:
                         if st.button("Open Chat", key=f"open_{result['chat_id']}", use_container_width=True):
@@ -533,7 +566,6 @@ with st.sidebar:
                             st.rerun()
                     with col2:
                         with st.popover("⋮"):
-                            # Rename option
                             new_name = st.text_input("Rename chat", 
                                                    value=result['chat_name'], 
                                                    key=f"rename_{result['chat_id']}")
@@ -541,7 +573,6 @@ with st.sidebar:
                                 st.session_state.chat_sessions[result['chat_id']]["name"] = new_name
                                 st.rerun()
                             
-                            # Delete option
                             if st.button("Delete", key=f"delete_{result['chat_id']}"):
                                 del st.session_state.chat_sessions[result['chat_id']]
                                 if st.session_state.active_chat == result['chat_id']:
@@ -553,14 +584,13 @@ with st.sidebar:
         else:
             st.info("No matching chats found. Try different keywords.")
     
-    # Regular Chat List (when not searching)
+    # Regular Chat List
     else:
         st.write("**Your Chats:**")
         
         if not st.session_state.chat_sessions:
             st.info("No chats yet. Start a new conversation!")
         else:
-            # Sort chats by creation time (newest first)
             sorted_chats = sorted(
                 st.session_state.chat_sessions.items(),
                 key=lambda x: x[1].get('created_at', datetime.min),
@@ -570,11 +600,9 @@ with st.sidebar:
             for chat_id, session in sorted_chats:
                 is_active = st.session_state.active_chat == chat_id
                 
-                # Single line chat item with three-dot menu
                 chat_col1, chat_col2 = st.columns([4, 1])
                 
                 with chat_col1:
-                    # Chat selection button
                     button_type = "primary" if is_active else "secondary"
                     if st.button(
                         session["name"], 
@@ -587,9 +615,7 @@ with st.sidebar:
                         st.rerun()
                 
                 with chat_col2:
-                    # Three-dot menu
                     with st.popover("⋮"):
-                        # Rename option
                         new_name = st.text_input("Rename chat", 
                                                value=session["name"], 
                                                key=f"rename_{chat_id}")
@@ -597,11 +623,9 @@ with st.sidebar:
                             st.session_state.chat_sessions[chat_id]["name"] = new_name
                             st.rerun()
                         
-                        # Share option (placeholder)
                         if st.button("Share", key=f"share_{chat_id}"):
                             st.info("Share functionality coming soon!")
                         
-                        # Delete option
                         if st.button("Delete", key=f"delete_{chat_id}"):
                             del st.session_state.chat_sessions[chat_id]
                             if st.session_state.active_chat == chat_id:
@@ -612,10 +636,9 @@ with st.sidebar:
     st.markdown("---")
     
     # ==========================
-    # SECOND: SELECT MODEL
+    # MODEL SELECTION
     # ==========================
     
-    # Professional Advocate Logo with Legal Symbol
     st.markdown("""
     <div style="display: flex; align-items: center; margin-bottom: 20px;">
         <div style="
@@ -640,17 +663,17 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     model = st.selectbox("Select Model", [
+        "openai/gpt-5-mini",  # Put cheaper model first
+        "google/gemini-2.5-flash-lite",
+        "google/gemini-2.5-flash",
         "openai/gpt-5",
         "anthropic/claude-sonnet-4",
         "google/gemini-2.5-pro",
         "x-ai/grok-code-fast-1",
-        "google/gemini-2.5-flash",
-        "google/gemini-2.5-flash-lite",
-        "openai/gpt-5-mini"
     ], index=0)
     
     # ==========================
-    # THIRD: FILE UPLOAD & OCR ENABLE
+    # FILE UPLOAD & OCR
     # ==========================
     uploaded_pdfs = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
     if uploaded_pdfs: 
@@ -659,7 +682,7 @@ with st.sidebar:
     use_ocr_toggle = st.toggle("Enable OCR for scanned PDFs", help="Uses Google Vision to extract text from image-based PDFs. Slower and requires your API key.")
 
     # ==========================
-    # FOURTH: COURTS IN INDIA
+    # COURTS IN INDIA
     # ==========================
     st.markdown("---")
     with st.expander("⚖️ Courts in India"):
@@ -679,7 +702,6 @@ with st.sidebar:
 # ==========================
 # MAIN CHAT INTERFACE
 # ==========================
-# Professional Legal Advocate Header with Enhanced Logo
 st.markdown("""
 <div style="display: flex; align-items: center; margin-bottom: 20px; padding: 20px; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-radius: 10px; border-left: 5px solid #1e3c72;">
     <div style="
@@ -706,7 +728,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Knowledge Base Status Banner
-if folder_index.ntotal <= 5:
+if folder_index and folder_index.ntotal <= 5:
     st.warning("""
     ⚠️ **Using Fallback Knowledge Base** 
     - The app is running with basic legal concepts
@@ -723,7 +745,6 @@ chat_container = st.container()
 with chat_container:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            # Apply keyword highlighting to message content
             highlighted_content = highlight_keywords(message["content"])
             st.markdown(highlighted_content)
             
@@ -777,29 +798,30 @@ if st.session_state.pending_prompts:
     choice = st.radio("Select prompt:", st.session_state.pending_prompts, key="prompt_selector")
     
     if st.button("Confirm and Generate Response"):
-        # Retrieve context and generate response
-        rag_context_full, sources = retrieve_and_rerank(choice, folder_index, folder_metadata, embed_model,
-                                                        reranker_model, top_k=2)
-        uploaded_context_full = ""
-        if st.session_state.uploaded_pdfs_data:
-            uploaded_context_full = process_uploaded_pdfs(st.session_state.uploaded_pdfs_data, use_ocr=use_ocr_toggle)
+        with st.spinner("Generating response..."):
+            # Retrieve context and generate response
+            rag_context_full, sources = retrieve_and_rerank(choice, folder_index, folder_metadata, embed_model,
+                                                            reranker_model, top_k=2)
+            uploaded_context_full = ""
+            if st.session_state.uploaded_pdfs_data:
+                uploaded_context_full = process_uploaded_pdfs(st.session_state.uploaded_pdfs_data, use_ocr=use_ocr_toggle)
 
-        final_prompt = construct_final_prompt(choice, rag_context_full, uploaded_context_full)
-        answer, tokens = call_openrouter(model, final_prompt)
-        
-        # Update tokens and add assistant response
-        st.session_state.tokens_used += tokens
-        audio_bytes = text_to_audio(answer)
-        
-        assistant_message = {"role": "assistant", "content": answer, "sources": sources}
-        if audio_bytes:
-            assistant_message["audio"] = audio_bytes
-        
-        st.session_state.messages.append(assistant_message)
-        
-        # Update chat session
-        if st.session_state.active_chat:
-            st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages.copy()
-        
-        st.session_state.pending_prompts = None
-        st.rerun()
+            final_prompt = construct_final_prompt(choice, rag_context_full, uploaded_context_full)
+            answer, tokens = call_openrouter(model, final_prompt)
+            
+            # Update tokens and add assistant response
+            st.session_state.tokens_used += tokens
+            audio_bytes = text_to_audio(answer)
+            
+            assistant_message = {"role": "assistant", "content": answer, "sources": sources}
+            if audio_bytes:
+                assistant_message["audio"] = audio_bytes
+            
+            st.session_state.messages.append(assistant_message)
+            
+            # Update chat session
+            if st.session_state.active_chat:
+                st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages.copy()
+            
+            st.session_state.pending_prompts = None
+            st.rerun()
