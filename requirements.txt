@@ -1,10 +1,10 @@
 streamlit
-PyMuPDF
-requests
+gdown
 faiss-cpu
-numpy
 sentence-transformers
 rank-bm25
 nltk
-gTTS
-gdown
+gtts
+numpy
+PyMuPDF
+requests
