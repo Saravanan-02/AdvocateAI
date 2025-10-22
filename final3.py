@@ -16,8 +16,6 @@ from nltk.corpus import stopwords
 import string
 import base64
 from datetime import datetime
-import io
-import json # Import json for API payloads
 
 # ==========================
 # NLTK DATA DOWNLOADS
@@ -35,13 +33,6 @@ except LookupError:
 # ==========================
 # CONFIG
 # ==========================
-# --- KEY FIX: Using your provided API keys ---
-# WARNING: Hardcoding keys is a major security risk!
-# Please use Streamlit Secrets (st.secrets) for production.
-# Create a file .streamlit/secrets.toml and add:
-# OPENROUTER_API_KEY = "your_openrouter_key"
-# GOOGLE_VISION_API_KEY = "your_google_key"
-# Then access them with: st.secrets["OPENROUTER_API_KEY"]
 OPENROUTER_API_KEY = "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"
 GOOGLE_VISION_API_KEY = "AIzaSyBFh_YqGdkvUjQPT6ihyur2mlvETJcOF_k"
 BASE_URL = "https://openrouter.ai/api/v1"
@@ -50,234 +41,100 @@ INDEX_FILE = "faiss_advanced_index.bin"
 METADATA_FILE = "metadata.pkl"
 
 # ==========================
-# COMPREHENSIVE LEGAL KNOWLEDGE BASE
-# (This function is unchanged)
+# AUTOMATIC FILE DOWNLOAD FROM GOOGLE DRIVE
 # ==========================
-def setup_comprehensive_knowledge_base():
-    """Create a comprehensive legal knowledge base that can function without API"""
-    st.warning("📁 Setting up comprehensive legal knowledge base...")
-    
-    # Extensive legal knowledge base
-    comprehensive_metadata = [
-        # Constitutional Law
-        {
-            'text': 'Article 226 of the Indian Constitution grants High Courts the power to issue writs for enforcement of fundamental rights and for any other purpose. The five types of writs are Habeas Corpus, Mandamus, Prohibition, Certiorari, and Quo Warranto.',
-            'source': 'Constitution of India - Article 226'
-        },
-        {
-            'text': 'Article 311 of the Constitution provides protection to government servants against dismissal, removal, or reduction in rank. No government servant can be dismissed or removed by authority subordinate to that which appointed him.',
-            'source': 'Constitution of India - Article 311'
-        },
-        {
-            'text': 'Fundamental Rights under Part III of Constitution include Right to Equality (Articles 14-18), Right to Freedom (Articles 19-22), Right against Exploitation (Articles 23-24), Right to Freedom of Religion (Articles 25-28), Cultural and Educational Rights (Articles 29-30), and Right to Constitutional Remedies (Article 32).',
-            'source': 'Fundamental Rights - Part III'
-        },
+def download_file_from_google_drive(file_id, destination):
+    """Download files from Google Drive automatically"""
+    if os.path.exists(destination):
+        return True
         
-        # Service Law & Suspension
-        {
-            'text': 'Suspension of a government employee must follow principles of natural justice. The employee must be given notice, opportunity of hearing, and reasons for suspension. Suspension cannot be arbitrary or malafide.',
-            'source': 'Service Law - Suspension Principles'
-        },
-        {
-            'text': 'In cases of suspension without notice, the affected employee can file a writ petition before the High Court under Article 226 challenging the suspension order as violative of natural justice and Article 311 protections.',
-            'source': 'Legal Remedy - Writ Petition'
-        },
-        {
-            'text': 'The Madras High Court has writ jurisdiction over Tamil Nadu and Puducherry. A writ petition should include prayer for quashing suspension order, reinstatement, back wages, and costs.',
-            'source': 'Madras High Court Jurisdiction'
-        },
-        
-        # Writ Petition Format
-        {
-            'text': 'A typical writ petition structure includes: Cause Title, Parties, Jurisdiction, Facts, Grounds, Prayer, Verification, and Affidavit. The affidavit must verify all factual assertions.',
-            'source': 'Writ Petition Structure'
-        },
-        {
-            'text': 'Essential grounds for challenging suspension: Violation of natural justice, violation of Article 311, malafide exercise of power, arbitrariness, non-application of mind, and violation of service rules.',
-            'source': 'Legal Grounds for Challenge'
-        },
-        
-        # Case Laws
-        {
-            'text': 'In State of Orissa vs. Dr. Binapani Dei (1967), Supreme Court held that even administrative orders involving civil consequences must follow principles of natural justice.',
-            'source': 'Binapani Dei Case - Natural Justice'
-        },
-        {
-            'text': 'In Maneka Gandhi vs. Union of India (1978), Supreme Court expanded the scope of Article 21 and established that procedure must be fair, just, and reasonable.',
-            'source': 'Maneka Gandhi Case'
-        },
-        {
-            'text': 'In D.K. Yadav vs. J.M.A. Industries (1993), Supreme Court held that termination without notice and hearing violates principles of natural justice.',
-            'source': 'D.K. Yadav Case'
-        },
-        
-        # Procedural Aspects
-        {
-            'text': 'The Limitation Act 1963 prescribes different limitation periods for different legal actions. For writ petitions, generally 90 days from cause of action, but courts have discretion to condone delay.',
-            'source': 'Limitation Period'
-        },
-        {
-            'text': 'Court fees for writ petitions vary by state. In Tamil Nadu, typical court fee is Rs. 500 for individuals and Rs. 1500 for organizations under Tamil Nadu Court Fees Act 1955.',
-            'source': 'Court Fees'
-        },
-        
-        # Practical Guidance
-        {
-            'text': 'Documents required for writ petition: Suspension order, Appointment order, Service rules, Representations made, Reply if any, Identity proof, and supporting documents.',
-            'source': 'Required Documents'
-        },
-        {
-            'text': 'The affidavit for writ petition must be sworn before Notary/Oath Commissioner and should verify each paragraph of the petition. False verification amounts to perjury.',
-            'source': 'Affidavit Requirements'
-        }
-    ]
-    
-    # Create embeddings
-    embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-    texts = [item['text'] for item in comprehensive_metadata]
-    embeddings = embedding_model.encode(texts, convert_to_numpy=True)
-    
-    # Create FAISS index
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dimension)
-    index.add(embeddings)
-    
-    # Save files locally for future use
-    try:
-        faiss.write_index(index, INDEX_FILE)
-        with open(METADATA_FILE, 'wb') as f:
-            pickle.dump(comprehensive_metadata, f)
-        st.success("✅ Comprehensive legal knowledge base created successfully!")
-    except Exception as e:
-        st.warning(f"Could not save knowledge base files: {e}")
-    
-    return index, comprehensive_metadata
-
-# ==================================
-# --- NEW FUNCTION: OPENROUTER LLM CALL ---
-# ==================================
-def generate_llm_response(prompt_messages, model_name):
-    """
-    Generate an intelligent response using the OpenRouter API.
-    """
-    if not OPENROUTER_API_KEY:
-        st.error("🚨 OPENROUTER_API_KEY is not set. Please add it to your Streamlit secrets.")
-        return "Error: API key not configured.", 0
-        
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": model_name,
-        "messages": prompt_messages,
-        "http_referer": "http://localhost:8501", # Optional, but good practice
-        "x_title": "Advocate AI Pro" # Optional
-    }
+    URL = "https://drive.google.com/uc?export=download"
+    session = requests.Session()
     
     try:
-        response = requests.post(
-            f"{BASE_URL}/chat/completions",
-            headers=headers,
-            data=json.dumps(data)
-        )
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response = session.get(URL, params={'id': file_id}, stream=True)
+        token = get_confirm_token(response)
         
-        result = response.json()
+        if token:
+            params = {'id': file_id, 'confirm': token}
+            response = session.get(URL, params=params, stream=True)
         
-        answer = result['choices'][0]['message']['content']
-        tokens = result.get('usage', {}).get('total_tokens', 0)
-        
-        return answer, tokens
-
-    except requests.exceptions.HTTPError as http_err:
-        st.error(f"HTTP error occurred: {http_err} - {response.text}")
-        return f"Error: {http_err} - {response.text}", 0
+        save_response_content(response, destination)
+        return True
     except Exception as e:
-        st.error(f"An error occurred while calling OpenRouter API: {e}")
-        return f"An error occurred: {e}", 0
+        st.error(f"Error downloading file: {e}")
+        return False
+
+def get_confirm_token(response):
+    for key, value in response.cookies.items():
+        if key.startswith('download_warning'):
+            return value
+    return None
+
+def save_response_content(response, destination):
+    CHUNK_SIZE = 32768
+    with open(destination, "wb") as f:
+        for chunk in response.iter_content(CHUNK_SIZE):
+            if chunk:
+                f.write(chunk)
 
 # ==========================
-# --- REMOVED: All 'generate_smart_response' and related functions ---
-# They are replaced by the 'generate_llm_response' function above.
-# ==========================
-
-
-# ==========================
-# LOAD MODELS (CACHED)
+# LOAD MODELS AND KNOWLEDGE BASE
 # ==========================
 @st.cache_resource
-def load_models():
-    """Load only the AI models (cached)"""
+def load_models_and_index():
+    """Load AI models and knowledge base automatically"""
+    # Load AI models
     embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     reranker_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu")
-    return embedding_model, reranker_model
-
-# ==========================
-# LOAD KNOWLEDGE BASE (NOT CACHED)
-# (This function is unchanged)
-# ==========================
-def load_knowledge_base():
-    """Load knowledge base files"""
-    # Try loading existing local files first
-    if os.path.exists(INDEX_FILE) and os.path.exists(METADATA_FILE):
-        try:
+    
+    # Google Drive file IDs (replace with your actual file IDs)
+    FAISS_FILE_ID = "1Ctr4N_eDIGL5Nmeb5Mx0M8BpesxHGxwg"
+    METADATA_FILE_ID = "1zx1Xm-B1SsLLt-7y50amAHPwikGUaG90"
+    
+    try:
+        # Download files if they don't exist
+        if not os.path.exists(INDEX_FILE):
+            with st.spinner("📥 Downloading FAISS index from Google Drive..."):
+                download_file_from_google_drive(FAISS_FILE_ID, INDEX_FILE)
+        
+        if not os.path.exists(METADATA_FILE):
+            with st.spinner("📥 Downloading metadata from Google Drive..."):
+                download_file_from_google_drive(METADATA_FILE_ID, METADATA_FILE)
+        
+        # Load the index and metadata
+        with st.spinner("🔧 Loading knowledge base..."):
             index = faiss.read_index(INDEX_FILE)
             with open(METADATA_FILE, "rb") as f:
                 metadata = pickle.load(f)
-            if index.ntotal > 0 and len(metadata) > 0:
-                st.success("✅ Loaded existing knowledge base from local files")
-                return index, metadata
-        except Exception as e:
-            st.warning(f"Could not load local files: {e}")
-    
-    # Create comprehensive knowledge base
-    st.warning("🚨 Setting up comprehensive legal knowledge base...")
-    index, metadata = setup_comprehensive_knowledge_base()
-    
-    return index, metadata
-
-# ==========================
-# HANDLE FILE UPLOADS
-# (This function is unchanged)
-# ==========================
-def handle_file_uploads():
-    """Handle file uploads for knowledge base"""
-    st.info("📤 Upload your knowledge base files (optional)")
-    
-    col1, col2 = st.columns(2)
-    
-    uploaded_faiss = None
-    uploaded_meta = None
-    
-    with col1:
-        uploaded_faiss = st.file_uploader("Upload FAISS Index (.bin)", type=['bin'], key="faiss_upload")
-    
-    with col2:
-        uploaded_meta = st.file_uploader("Upload Metadata (.pkl)", type=['pkl'], key="meta_upload")
-    
-    if uploaded_faiss is not None and uploaded_meta is not None:
-        if st.button("💾 Save Uploaded Files", use_container_width=True):
-            try:
-                # Save uploaded files
-                with open(INDEX_FILE, "wb") as f:
-                    f.write(uploaded_faiss.getvalue())
-                
-                with open(METADATA_FILE, "wb") as f:
-                    f.write(uploaded_meta.getvalue())
-                
-                st.success("✅ Knowledge base files saved successfully!")
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"Error saving uploaded files: {e}")
-    
-    return uploaded_faiss, uploaded_meta
+        
+        st.success(f"✅ Knowledge base loaded with {index.ntotal} chunks")
+        return embedding_model, reranker_model, index, metadata
+        
+    except Exception as e:
+        st.error(f"❌ Error loading knowledge base: {e}")
+        # Create a minimal fallback to prevent complete failure
+        st.warning("🔄 Setting up minimal knowledge base...")
+        
+        # Minimal fallback metadata
+        fallback_metadata = [
+            {'text': 'Article 226 of Indian Constitution provides writ jurisdiction to High Courts', 'source': 'Constitution'},
+            {'text': 'Suspension without notice violates natural justice principles', 'source': 'Service Law'},
+            {'text': 'Madras High Court has jurisdiction over Tamil Nadu and Puducherry', 'source': 'Jurisdiction'}
+        ]
+        
+        # Create minimal FAISS index
+        embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+        texts = [item['text'] for item in fallback_metadata]
+        embeddings = embedding_model.encode(texts, convert_to_numpy=True)
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatIP(dimension)
+        index.add(embeddings)
+        
+        return embedding_model, reranker_model, index, fallback_metadata
 
 # ==========================
 # RULE-BASED PROMPT GENERATION
-# (This function is unchanged)
 # ==========================
 def dynamic_query_generator(question):
     base_prompt = question.strip()
@@ -296,7 +153,6 @@ def dynamic_query_generator(question):
 
 # ==========================
 # LIGHTWEIGHT SUMMARIZATION
-# (This function is unchanged)
 # ==========================
 def create_extractive_summary(text, max_sentences=5):
     if not text:
@@ -315,8 +171,20 @@ def truncate_text(text, max_words=200):
     return " ".join(words[:max_words])
 
 # ==========================
+# LLM-BASED SOURCE SUMMARY
+# ==========================
+def summarize_source_with_llm(source_text, model="openai/gpt-5-mini"):
+    """Summarize source text using LLM"""
+    prompt = f"Summarize the following legal text in exactly 2 lines:\n\n{source_text}"
+    try:
+        summary, _ = call_openrouter(model, prompt)
+        summary = " ".join(summary.strip().splitlines())
+        return summary
+    except Exception as e:
+        return create_extractive_summary(source_text, max_sentences=2)
+
+# ==========================
 # HYBRID SEARCH
-# (This function is unchanged, but we will use its output differently)
 # ==========================
 def preprocess_text(text):
     if not text:
@@ -353,8 +221,7 @@ def reciprocal_rank_fusion(results_list, k=60):
             doc_id = item['source'] + '_' + item['text']
             fused_ranks[doc_id] = fused_ranks.get(doc_id, 0) + 1 / (k + rank)
     sorted_items = sorted(fused_ranks.items(), key=lambda x: x[1], reverse=True)
-    unique_items = {item['source'] + '_' + item['text']: item for results in results_list if results for item in
-                    results}
+    unique_items = {item['source'] + '_' + item['text']: item for results in results_list if results for item in results}
     fused_results = [unique_items[doc_id] for doc_id, _ in sorted_items if doc_id in unique_items]
     return fused_results
 
@@ -368,36 +235,22 @@ def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top
     if not pairs:
         return "", []
     scores = reranker_model.predict(pairs)
-    # --- KEY FIX: Increased context by increasing top_k to 5 ---
     reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
-    # --- KEY FIX: Using FULL text, not truncated text ---
-    top_chunks = [item[0]["text"] for item in reranked]
+    top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
     sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
     return "\n\n".join(top_chunks), sources
 
 def highlight_keywords(text):
-    # This highlighting is basic and can be improved
-    # For now, let's keep it simple
-    text = re.sub(r'\b(Article \d{1,3})\b', r'**\1**', text, flags=re.IGNORECASE)
-    text = re.sub(r'\b(Writ Petition)\b', r'**\1**', text, flags=re.IGNORECASE)
-    text = re.sub(r'\b(High Court)\b', r'**\1**', text, flags=re.IGNORECASE)
-    text = re.sub(r'\b(Supreme Court)\b', r'**\1**', text, flags=re.IGNORECASE)
-    text = re.sub(r'\b(suspension|terminated|dismissed)\b', r'**\1**', text, flags=re.IGNORECASE)
-    text = re.sub(r'\b(natural justice)\b', r'**\1**', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b([A-Z][a-z]+)\b', r'**\1**', text)  # Names
+    text = re.sub(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', r'**\1**', text)  # Dates
+    text = re.sub(r'\b\d+\b', r'**\g<0>**', text)  # Numbers
     return text
 
 # ==================================
 # GOOGLE VISION OCR FUNCTION
-# (This function is unchanged)
 # ==================================
 def ocr_page_with_google_vision(page):
-    """
-    Performs OCR on a single PDF page using Google Cloud Vision API.
-    """
-    if not GOOGLE_VISION_API_KEY:
-        st.error("🚨 GOOGLE_VISION_API_KEY is not set. OCR will not function.")
-        return ""
-        
+    """Perform OCR on PDF page using Google Vision API"""
     pix = page.get_pixmap()
     img_bytes = pix.tobytes("png")
     b64_image = base64.b64encode(img_bytes).decode('utf-8')
@@ -418,20 +271,17 @@ def ocr_page_with_google_vision(page):
         result = response.json()
 
         if 'error' in result['responses'][0]:
-            st.error(f"Google Vision API Error: {result['responses'][0]['error']['message']}")
             return ""
 
         if 'fullTextAnnotation' in result['responses'][0]:
             return result['responses'][0]['fullTextAnnotation']['text']
         else:
-            return ""  # No text found
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error calling Google Vision API: {e}")
+            return ""
+    except requests.exceptions.RequestException:
         return ""
 
 # ======================================
 # PDF LOADER WITH OCR
-# (This function is unchanged)
 # ======================================
 def process_uploaded_pdfs(uploaded_files, use_ocr=False):
     all_text = []
@@ -442,24 +292,16 @@ def process_uploaded_pdfs(uploaded_files, use_ocr=False):
     total_pages = 0
     docs = []
     for pdf in uploaded_files:
-        try:
-            doc = fitz.open(stream=pdf.read(), filetype="pdf")
-            docs.append({'doc': doc, 'name': pdf.name})
-            total_pages += len(doc)
-        except Exception as e:
-            st.warning(f"Could not read {pdf.name}: {e}")
+        doc = fitz.open(stream=pdf.read(), filetype="pdf")
+        docs.append({'doc': doc, 'name': pdf.name})
+        total_pages += len(doc)
     
-    if total_pages == 0:
-        progress_bar.empty()
-        return ""
-        
     pages_processed = 0
     for item in docs:
         doc = item['doc']
         pdf_name = item['name']
         for i, page in enumerate(doc):
             text = page.get_text()
-            # If OCR is enabled and the page has very little text, assume it's an image
             if use_ocr and len(text.strip()) < 50:
                 with st.spinner(f"Running OCR on page {i+1} of '{pdf_name}'..."):
                     ocr_text = ocr_page_with_google_vision(page)
@@ -474,41 +316,48 @@ def process_uploaded_pdfs(uploaded_files, use_ocr=False):
     return "\n".join(all_text)
 
 # ==========================
-# --- REMOVED: construct_final_prompt ---
-# This logic is now handled directly in the main chat loop
-# for better prompt engineering.
+# PROMPT CONSTRUCTION
 # ==========================
+def construct_final_prompt(question, rag_summary, uploaded_summary):
+    rag_lines = rag_summary.strip().splitlines()
+    rag_summary = " ".join(rag_lines[:3])
+    uploaded_summary = truncate_text(uploaded_summary, max_words=200)
+    return f"Advocate AI, answer clearly and cite references.\nQ: {question}\nKnowledge: {rag_summary}\nUploaded Docs: {uploaded_summary}"
 
+# ==========================
+# OPENROUTER API CALL
+# ==========================
+def call_openrouter(model, prompt):
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    
+    try:
+        response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        answer = result["choices"][0]["message"]["content"]
+        tokens_used = result.get("usage", {}).get("total_tokens", 0)
+        return answer, tokens_used
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return f"Error: Unable to get response from {model}. Please try again.", 0
 
 # ==========================
 # TEXT TO SPEECH
-# (This function is unchanged)
 # ==========================
 def text_to_audio(text):
     try:
-        # Clean text for TTS
-        tts_text = re.sub(r'[*_`]', '', text) # Remove markdown
-        tts_text = re.sub(r'\s+', ' ', tts_text).strip() # Normalize whitespace
-        
-        if not tts_text:
-            return None
-            
-        tts = gTTS(text=tts_text, lang='en')
+        tts = gTTS(text)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             tts.save(fp.name)
             return open(fp.name, "rb").read()
-    except Exception as e:
-        print(f"gTTS error: {e}")
+    except Exception:
         return None
 
 # ==========================
 # ENHANCED SEARCH FUNCTION
-# (This function is unchanged)
 # ==========================
 def search_chat_history(search_query, chat_sessions):
-    """
-    Enhanced search through all chat sessions with context highlighting.
-    """
     results = []
     if not search_query.strip():
         return results
@@ -518,7 +367,6 @@ def search_chat_history(search_query, chat_sessions):
     for chat_id, session in chat_sessions.items():
         matches = []
         
-        # Search in chat name
         chat_name_lower = session["name"].lower()
         if any(term in chat_name_lower for term in search_terms):
             matches.append({
@@ -527,11 +375,9 @@ def search_chat_history(search_query, chat_sessions):
                 "highlighted": highlight_search_terms(session["name"], search_terms)
             })
         
-        # Search in messages with context
         for i, message in enumerate(session["messages"]):
             content_lower = message["content"].lower()
             if any(term in content_lower for term in search_terms):
-                # Extract context around the match
                 highlighted_content = highlight_search_terms(message["content"], search_terms)
                 matches.append({
                     "type": "message",
@@ -552,57 +398,22 @@ def search_chat_history(search_query, chat_sessions):
     return results
 
 def highlight_search_terms(text, search_terms):
-    """
-    Highlight search terms in text with markdown bold.
-    """
     highlighted_text = text
     for term in search_terms:
-        # Use regex to find the term case-insensitively and replace it
-        # while preserving the original casing of the found term.
-        try:
-            pattern = re.compile(f'({re.escape(term)})', re.IGNORECASE)
-            highlighted_text = pattern.sub(r'**\1**', highlighted_text)
-        except re.error:
-            # Fallback for complex terms that might break regex
-            pass
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+        highlighted_text = pattern.sub(f"**{term}**", highlighted_text)
     return highlighted_text
 
 # ==========================
 # STREAMLIT APP
 # ==========================
-st.set_page_config(page_title="Advocate AI - Legal Research Assistant", layout="wide")
+st.set_page_config(page_title="Advocate AI Pro", layout="wide")
 
-# --- KEY ADDITION: Security Warning ---
-st.error("""
-**🚨 SECURITY WARNING:** Your API keys are currently hardcoded in this script.
-This is **extremely unsafe** and exposes your keys to anyone who can see this code.
-
-**Please do the following:**
-1.  Create a folder named `.streamlit` in the same directory as your app.
-2.  Inside `.streamlit`, create a file named `secrets.toml`.
-3.  Add your keys to this file:
-    ```toml
-    OPENROUTER_API_KEY = "sk-or-v1-b8213c64..."
-    GOOGLE_VISION_API_KEY = "AIzaSyBFh_YqGdk..."
-    ```
-4.  Restart your Streamlit app.
-5.  (Optional but recommended) Change the code to use `st.secrets["OPENROUTER_API_KEY"]` and `st.secrets["GOOGLE_VISION_API_KEY"]` instead of the hardcoded strings.
-""")
-
-# Add a startup message
-st.info("🚀 Loading legal knowledge base and AI models...")
-
-# Load AI models (cached)
-embed_model, reranker_model = load_models()
+# Load models and index
+with st.spinner("🚀 Loading AI models and knowledge base..."):
+    embed_model, reranker_model, folder_index, folder_metadata = load_models_and_index()
 
 # Initialize session state
-if "knowledge_base_loaded" not in st.session_state:
-    st.session_state.knowledge_base_loaded = False
-if "folder_index" not in st.session_state:
-    st.session_state.folder_index = None
-if "folder_metadata" not in st.session_state:
-    st.session_state.folder_metadata = None
-# --- THIS IS THE CORRECTED BLOCK ---
 if "messages" not in st.session_state: 
     st.session_state.messages = []
 if "pending_prompts" not in st.session_state: 
@@ -616,21 +427,84 @@ if "chat_sessions" not in st.session_state:
 if "active_chat" not in st.session_state:
     st.session_state.active_chat = None
 
-# Load knowledge base (not cached)
-if not st.session_state.knowledge_base_loaded:
-    with st.spinner("Loading comprehensive legal knowledge base..."):
-        st.session_state.folder_index, st.session_state.folder_metadata = load_knowledge_base()
-        st.session_state.knowledge_base_loaded = True
-
-folder_index = st.session_state.folder_index
-folder_metadata = st.session_state.folder_metadata
-
 # ==========================
 # SIDEBAR
 # ==========================
 with st.sidebar:
     # ==========================
-    # APP INFO
+    # CHAT HISTORY
+    # ==========================
+    st.header("💬 Chat History")
+
+    if st.button("➕ New Chat", use_container_width=True):
+        chat_id = f"chat_{len(st.session_state.chat_sessions) + 1}_{random.randint(1000,9999)}"
+        st.session_state.chat_sessions[chat_id] = {
+            "name": "New Chat",
+            "messages": [],
+            "created_at": datetime.now()
+        }
+        st.session_state.active_chat = chat_id
+        st.session_state.messages = []
+        st.rerun()
+
+    search_query = st.text_input("🔍 Search chat history...", placeholder="Search by keyword...")
+    
+    if search_query:
+        search_results = search_chat_history(search_query, st.session_state.chat_sessions)
+        if search_results:
+            st.write(f"**Found {len(search_results)} chat(s):**")
+            for result in search_results:
+                with st.container():
+                    st.markdown(f"**{result['chat_name']}** ({result['total_matches']} matches)")
+                    for match in result['matches'][:2]:
+                        if match['type'] == 'chat_name':
+                            st.caption("📁 Chat name:")
+                        else:
+                            role_icon = "👤" if match['role'] == 'user' else "🤖"
+                            st.caption(f"{role_icon} Message:")
+                        st.markdown(f"`{match['highlighted']}`")
+                    
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        if st.button("Open Chat", key=f"open_{result['chat_id']}", use_container_width=True):
+                            st.session_state.active_chat = result['chat_id']
+                            st.session_state.messages = st.session_state.chat_sessions[result['chat_id']]["messages"]
+                            st.rerun()
+                    with col2:
+                        with st.popover("⋮"):
+                            if st.button("Delete", key=f"delete_{result['chat_id']}"):
+                                del st.session_state.chat_sessions[result['chat_id']]
+                                if st.session_state.active_chat == result['chat_id']:
+                                    st.session_state.active_chat = None
+                                    st.session_state.messages = []
+                                st.rerun()
+                    st.divider()
+        else:
+            st.info("No matching chats found.")
+    
+    else:
+        st.write("**Your Chats:**")
+        if not st.session_state.chat_sessions:
+            st.info("No chats yet. Start a new conversation!")
+        else:
+            sorted_chats = sorted(
+                st.session_state.chat_sessions.items(),
+                key=lambda x: x[1].get('created_at', datetime.min),
+                reverse=True
+            )
+            
+            for chat_id, session in sorted_chats:
+                is_active = st.session_state.active_chat == chat_id
+                button_type = "primary" if is_active else "secondary"
+                if st.button(session["name"], key=f"chat_btn_{chat_id}", use_container_width=True, type=button_type):
+                    st.session_state.active_chat = chat_id
+                    st.session_state.messages = session["messages"]
+                    st.rerun()
+
+    st.markdown("---")
+    
+    # ==========================
+    # SELECT MODEL
     # ==========================
     st.markdown("""
     <div style="display: flex; align-items: center; margin-bottom: 20px;">
@@ -646,7 +520,6 @@ with st.sidebar:
             font-size: 24px; 
             margin-right: 12px;
             border: 2px solid #d4af37;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
         ">⚖️</div>
         <div>
             <h3 style="margin: 0; color: #1e3c72; font-weight: bold;">Advocate AI Pro</h3>
@@ -655,176 +528,37 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    # ==========================
-    # --- NEW: LLM Model Selector ---
-    # ==========================
-    st.header("🤖 AI Model")
-    st.session_state.llm_model = st.selectbox(
-        "Select LLM Model (via OpenRouter)",
-        (
-            "mistralai/mistral-7b-instruct:free",
-            "google/gemma-7b-it:free",
-            "mistralai/mixtral-8x7b-instruct",
-            "openai/gpt-3.5-turbo",
-            "anthropic/claude-3-haiku-20240307"
-        ),
-        index=0,
-        help="Select the AI model to generate responses. Free models are available."
-    )
+    model = st.selectbox("Select Model", [
+        "openai/gpt-5",
+        "anthropic/claude-sonnet-4",
+        "google/gemini-2.5-pro",
+        "x-ai/grok-code-fast-1",
+        "google/gemini-2.5-flash",
+        "google/gemini-2.5-flash-lite",
+        "openai/gpt-5-mini"
+    ], index=0)
     
-    # ==========================
-    # KNOWLEDGE BASE STATUS
-    # ==========================
-    if st.session_state.knowledge_base_loaded:
-        st.success(f"✅ Knowledge Base: {folder_index.ntotal} legal concepts loaded")
-    else:
-        st.error("❌ Knowledge Base: Loading...")
-    
-    st.markdown("---")
-    
-    # ==========================
-    # KNOWLEDGE BASE UPLOAD SECTION
-    # ==========================
-    with st.expander("📁 Upload Knowledge Base", expanded=False):
-        handle_file_uploads()
-    
-    # ==========================
-    # CHAT HISTORY
-    # ==========================
-    st.header("💬 Chat History")
-
-    # New Chat Button
-    if st.button("➕ New Chat", use_container_width=True):
-        chat_id = f"chat_{len(st.session_state.chat_sessions) + 1}_{random.randint(1000,9999)}"
-        st.session_state.chat_sessions[chat_id] = {
-            "name": "New Chat",
-            "messages": [],
-            "created_at": datetime.now()
-        }
-        st.session_state.active_chat = chat_id
-        st.session_state.messages = []
-        st.rerun()
-
-    # Enhanced Search Bar
-    search_query = st.text_input("🔍 Search chat history...", placeholder="Search by keyword, name, date...")
-    
-    # Search Results Section
-    if search_query:
-        search_results = search_chat_history(search_query, st.session_state.chat_sessions)
-        if search_results:
-            st.write(f"**Found {len(search_results)} chat(s):**")
-            
-            for result in search_results:
-                with st.container():
-                    st.markdown(f"**{result['chat_name']}** ({result['total_matches']} matches)")
-                    
-                    for match in result['matches'][:3]:
-                        if match['type'] == 'chat_name':
-                            st.caption("📁 Chat name:")
-                        else:
-                            role_icon = "👤" if match['role'] == 'user' else "🤖"
-                            st.caption(f"{role_icon} Message:")
-                        
-                        # Display highlighted text with markdown
-                        st.markdown(f"> {match['highlighted']}", unsafe_allow_html=True)
-                    
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        if st.button("Open Chat", key=f"open_{result['chat_id']}", use_container_width=True):
-                            st.session_state.active_chat = result['chat_id']
-                            st.session_state.messages = st.session_state.chat_sessions[result['chat_id']]["messages"]
-                            st.rerun()
-                    with col2:
-                        with st.popover("⋮"):
-                            new_name = st.text_input("Rename chat", 
-                                                   value=result['chat_name'], 
-                                                   key=f"rename_{result['chat_id']}")
-                            if st.button("Save", key=f"save_{result['chat_id']}"):
-                                st.session_state.chat_sessions[result['chat_id']]["name"] = new_name
-                                st.rerun()
-                            
-                            if st.button("Delete", key=f"delete_{result['chat_id']}"):
-                                del st.session_state.chat_sessions[result['chat_id']]
-                                if st.session_state.active_chat == result['chat_id']:
-                                    st.session_state.active_chat = None
-                                    st.session_state.messages = []
-                                st.rerun()
-                    
-                    st.divider()
-        else:
-            st.info("No matching chats found. Try different keywords.")
-    
-    # Regular Chat List
-    else:
-        st.write("**Your Chats:**")
-        
-        if not st.session_state.chat_sessions:
-            st.info("No chats yet. Start a new conversation!")
-        else:
-            sorted_chats = sorted(
-                st.session_state.chat_sessions.items(),
-                key=lambda x: x[1].get('created_at', datetime.min),
-                reverse=True
-            )
-            
-            for chat_id, session in sorted_chats:
-                is_active = st.session_state.active_chat == chat_id
-                
-                chat_col1, chat_col2 = st.columns([4, 1])
-                
-                with chat_col1:
-                    button_type = "primary" if is_active else "secondary"
-                    if st.button(
-                        session["name"], 
-                        key=f"chat_btn_{chat_id}",
-                        use_container_width=True,
-                        type=button_type
-                    ):
-                        st.session_state.active_chat = chat_id
-                        st.session_state.messages = session["messages"]
-                        st.rerun()
-                
-                with chat_col2:
-                    with st.popover("⋮"):
-                        new_name = st.text_input("Rename chat", 
-                                               value=session["name"], 
-                                               key=f"rename_{chat_id}")
-                        if st.button("Save", key=f"save_{chat_id}"):
-                            st.session_state.chat_sessions[chat_id]["name"] = new_name
-                            st.rerun()
-                        
-                        if st.button("Share", key=f"share_{chat_id}"):
-                            st.info("Share functionality coming soon!")
-                        
-                        if st.button("Delete", key=f"delete_{chat_id}"):
-                            del st.session_state.chat_sessions[chat_id]
-                            if st.session_state.active_chat == chat_id:
-                                st.session_state.active_chat = None
-                                st.session_state.messages = []
-                            st.rerun()
-
-    st.markdown("---")
+    st.success(f"Knowledge Base: {folder_index.ntotal} chunks", icon="✅")
     
     # ==========================
     # FILE UPLOAD & OCR
     # ==========================
-    uploaded_pdfs = st.file_uploader("Upload PDFs for this chat", type=["pdf"], accept_multiple_files=True)
+    uploaded_pdfs = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
     if uploaded_pdfs: 
         st.session_state.uploaded_pdfs_data = uploaded_pdfs
     
-    use_ocr_toggle = st.toggle("Enable OCR for scanned PDFs", help="Uses Google Vision to extract text from image-based PDFs. Slower and requires your API key.")
+    use_ocr_toggle = st.toggle("Enable OCR for scanned PDFs")
 
     # ==========================
     # COURTS IN INDIA
-    # (Unchanged)
     # ==========================
     st.markdown("---")
     with st.expander("⚖️ Courts in India"):
         st.markdown("[Supreme Court of India](https://www.sci.gov.in/)")
         st.markdown("[eCourts Services](https://ecourts.gov.in/)")
-        st.markdown("[High Courts (All States)](https://ecommitteesci.gov.in/high-courts/)")
-        # ... (rest of the links) ...
-        st.markdown("[Election Commission / Tribunals](https://eci.gov.in/)")
+        st.markdown("[High Courts](https://ecommitteesci.gov.in/high-courts/)")
+        st.markdown("[District Courts](https://districts.ecourts.gov.in/)")
+        st.markdown("[Judgment Search](https://judgments.ecourts.gov.in/)")
 
 # ==========================
 # MAIN CHAT INTERFACE
@@ -843,7 +577,6 @@ st.markdown("""
         font-size: 32px; 
         margin-right: 20px;
         border: 3px solid #d4af37;
-        box-shadow: 0 6px 12px rgba(0,0,0,0.15);
     ">⚖️</div>
     <div>
         <h1 style="margin: 0; color: #1e3c72; font-weight: 700; font-size: 2.5rem;">Legal Research Assistant</h1>
@@ -853,21 +586,6 @@ st.markdown("""
     </div>
 </div>
 """, unsafe_allow_html=True)
-
-# App Status Banner
-# --- KEY FIX: Updated status banner ---
-if OPENROUTER_API_KEY:
-    st.success(f"""
-    ✅ **App Status: Fully Functional & API Connected** - Comprehensive legal knowledge base loaded
-    - Connected to OpenRouter (Model: `{st.session_state.llm_model}`)
-    - PDF processing available
-    """)
-else:
-    st.error("""
-    ❌ **App Status: API Key Missing**
-    - The app is running in offline mode.
-    - Please add your `OPENROUTER_API_KEY` to `.streamlit/secrets.toml` to enable AI responses.
-    """)
 
 # Display current chat context
 if st.session_state.active_chat and st.session_state.active_chat in st.session_state.chat_sessions:
@@ -884,8 +602,9 @@ with chat_container:
             if message.get("sources"):
                 with st.expander("Show Sources"):
                     for source in message["sources"]:
+                        llm_summary = summarize_source_with_llm(source["text"], model=model)
                         st.markdown(f"**Source:** `{source['source']}`")
-                        st.markdown(f"**Content:** {source['text']}")
+                        st.markdown(f"**Summary:** {llm_summary}")
             
             if message.get("audio"):
                 st.audio(message["audio"], format="audio/mp3")
@@ -893,10 +612,9 @@ with chat_container:
     if st.session_state.tokens_used > 0:
         st.markdown(f"**Total Tokens Used:** {st.session_state.tokens_used}")
 
-# Chat Input with Auto Chat Creation and Auto Name Update
+# Chat Input
 question = st.chat_input("Enter your legal question...")
 if question:
-    # Auto-create new chat if none exists
     if st.session_state.active_chat is None:
         chat_id = f"chat_{len(st.session_state.chat_sessions) + 1}_{random.randint(1000,9999)}"
         st.session_state.chat_sessions[chat_id] = {
@@ -907,19 +625,15 @@ if question:
         st.session_state.active_chat = chat_id
         st.session_state.messages = []
     else:
-        # Auto-update chat name for new chats when first question is asked
         current_chat = st.session_state.chat_sessions[st.session_state.active_chat]
         if current_chat["name"] == "New Chat" and len(current_chat["messages"]) == 0:
             current_chat["name"] = question[:50] + "..." if len(question) > 50 else question
     
-    # Add user message to current chat
     st.session_state.messages.append({"role": "user", "content": question})
     
-    # Update the chat session with current messages
     if st.session_state.active_chat:
         st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages.copy()
     
-    # Generate prompt variations
     refined_prompts = dynamic_query_generator(question)
     st.session_state.pending_prompts = refined_prompts
     st.rerun()
@@ -930,61 +644,15 @@ if st.session_state.pending_prompts:
     choice = st.radio("Select prompt:", st.session_state.pending_prompts, key="prompt_selector")
     
     if st.button("Confirm and Generate Response"):
-        with st.spinner("🔍 Searching legal knowledge base and calling LLM..."):
-            
-            # --- KEY FIX: RAG and LLM Call Logic ---
-            
-            # 1. Retrieve context from legal knowledge base
-            rag_context_full, sources = retrieve_and_rerank(
-                choice, 
-                folder_index, 
-                folder_metadata, 
-                embed_model,
-                reranker_model, 
-                top_k=5 # Get more context
-            )
-            
-            # 2. Process uploaded PDFs
+        with st.spinner("🔍 Retrieving legal context and generating response..."):
+            rag_context_full, sources = retrieve_and_rerank(choice, folder_index, folder_metadata, embed_model, reranker_model, top_k=2)
             uploaded_context_full = ""
             if st.session_state.uploaded_pdfs_data:
                 uploaded_context_full = process_uploaded_pdfs(st.session_state.uploaded_pdfs_data, use_ocr=use_ocr_toggle)
 
-            # 3. Construct the prompt for the LLM
-            system_prompt = """
-You are Advocate AI, a professional legal research assistant.
-Your goal is to provide clear, accurate, and concise answers to legal questions.
-- Use the provided 'Knowledge from Database' and 'Uploaded Documents' to formulate your response.
-- Always cite your sources clearly using the 'source' field (e.g., [Source: Constitution of India - Article 226]).
-- If the provided context is insufficient, state that you cannot answer based on the given information and do not invent information.
-- Structure your answer clearly. Use markdown for formatting, bullet points, and bold text to improve readability.
-- Be helpful and professional.
-"""
+            final_prompt = construct_final_prompt(choice, rag_context_full, uploaded_context_full)
+            answer, tokens = call_openrouter(model, final_prompt)
             
-            user_prompt = f"""
-Based on the following context:
-
---- KNOWLEDGE FROM DATABASE ---
-{rag_context_full}
--------------------------------
-
---- UPLOADED DOCUMENTS ---
-{uploaded_context_full if uploaded_context_full else "No documents uploaded."}
---------------------------
-
-Please answer the following question:
-Question: {choice}
-"""
-            
-            messages_payload = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-
-            # 4. Generate response using the LLM
-            model_name = st.session_state.llm_model
-            answer, tokens = generate_llm_response(messages_payload, model_name)
-            
-            # 5. Update tokens and add assistant response
             st.session_state.tokens_used += tokens
             audio_bytes = text_to_audio(answer)
             
@@ -994,11 +662,8 @@ Question: {choice}
             
             st.session_state.messages.append(assistant_message)
             
-            # 6. Update chat session
             if st.session_state.active_chat:
                 st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages.copy()
             
-            # 7. Clear pending prompts and rerun
             st.session_state.pending_prompts = None
             st.rerun()
-
