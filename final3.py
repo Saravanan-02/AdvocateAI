@@ -395,14 +395,26 @@ def construct_final_prompt(question, rag_summary, uploaded_summary):
 # OPENROUTER API CALL
 # ==========================
 def call_openrouter(model, prompt):
-    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
     data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-    response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
-    response.raise_for_status()
-    result = response.json()
-    answer = result["choices"][0]["message"]["content"]
-    tokens_used = result.get("usage", {}).get("total_tokens", 0)
-    return answer, tokens_used
+
+    try:
+        response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        answer = result["choices"][0]["message"]["content"]
+        tokens_used = result.get("usage", {}).get("total_tokens", 0)
+        return answer, tokens_used
+    except requests.exceptions.HTTPError as e:
+        st.error(f"OpenRouter API returned an error: {e}")
+        return "Error: Could not get response from OpenRouter.", 0
+    except Exception as e:
+        st.error(f"Unexpected error calling OpenRouter: {e}")
+        return "Error: Could not get response from OpenRouter.", 0
+
 
 # ==========================
 # TEXT TO SPEECH
@@ -821,4 +833,5 @@ if st.session_state.pending_prompts:
 
         st.session_state.pending_prompts = None
         st.rerun()
+
 
