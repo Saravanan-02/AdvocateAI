@@ -1130,5 +1130,3 @@ if st.session_state.pending_prompts:
             
             st.session_state.pending_prompts = None
             st.rerun()
-```
-
