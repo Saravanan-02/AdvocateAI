@@ -8,3 +8,4 @@ gtts
 numpy
 PyMuPDF
 requests
+canvas
