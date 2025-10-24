@@ -27,15 +27,16 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.units import inch
 
 # --- WORD (.docx) Dependencies ---
-# Graceful handling for missing python-docx
-docx_available = False
+# You must run: pip install python-docx
 try:
     from docx import Document
     from docx.shared import Pt, Inches
     from docx.enum.text import WD_PARAGRAPH_ALIGN
-    docx_available = True
 except ImportError:
-    st.warning("The 'python-docx' library is not installed. Word export will be disabled. Install with: 'pip install python-docx'")
+    st.error("The 'python-docx' library is not installed. Please run 'pip install python-docx' to enable Word export.")
+    # Stop the app if the required library for the new feature is missing
+    if "Document" not in globals():
+        st.stop()
 
 
 # ==========================
@@ -189,16 +190,7 @@ def reciprocal_rank_fusion(results_list, k=60):
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
     query_emb = embed_model.encode([query], convert_to_numpy=True)
     distances, indices = index.search(query_emb, top_k * 4)
-    
-    # FIX: Handle IndexScalarQuantizer by using ntotal instead of len
-    try:
-        # Try to get the total number of vectors in the index
-        total_vectors = index.ntotal
-    except AttributeError:
-        # Fallback: use metadata length
-        total_vectors = len(metadata)
-    
-    semantic_results = [metadata[idx] for idx in indices[0] if idx < total_vectors]
+    semantic_results = [metadata[idx] for idx in indices[0] if idx < len(metadata)]
     bm25_results = bm25_search(query, metadata, top_k=top_k * 4)
     fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
     pairs = [[query, c["text"]] for c in fused_candidates]
@@ -570,10 +562,6 @@ def generate_qna_content_word(messages, chat_name):
     """
     Generates a .docx file with Times New Roman 15pt font and 1.5 line spacing.
     """
-    if not docx_available:
-        st.error("Word export is not available. Please install python-docx: pip install python-docx")
-        return b''
-    
     document = Document()
     
     # Set default style for the whole document
@@ -830,8 +818,7 @@ with st.sidebar:
         
         # Generate file bytes
         pdf_content_bytes = generate_qna_content_pdf(current_messages, current_chat_name)
-        if docx_available:
-            word_content_bytes = generate_qna_content_word(current_messages, current_chat_name)
+        word_content_bytes = generate_qna_content_word(current_messages, current_chat_name)
 
     # PDF Download Button
     st.download_button(
@@ -843,16 +830,15 @@ with st.sidebar:
         disabled=(not pdf_content_bytes)
     )
     
-    # WORD Download Button (NEW) - Only show if docx is available
-    if docx_available:
-        st.download_button(
-            label="⬇️ Download Q&A as Word", 
-            data=word_content_bytes, 
-            file_name=word_file_name,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
-            use_container_width=True,
-            disabled=(not word_content_bytes)
-        )
+    # WORD Download Button (NEW)
+    st.download_button(
+        label="⬇️ Download Q&A as Word", 
+        data=word_content_bytes, 
+        file_name=word_file_name,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
+        use_container_width=True,
+        disabled=(not word_content_bytes)
+    )
     
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.chat_sessions = {}
