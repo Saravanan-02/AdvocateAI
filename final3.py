@@ -1,27 +1,3 @@
-Here is the full, updated code.
-
-I've merged the features from your second script into your original code.
-
-### Summary of Changes:
-
-1.  **PDF & Word Export:** I've added the `python-docx` and `reportlab` imports and all the necessary helper functions (`generate_qna_content_pdf`, `generate_qna_content_word`, etc.) from your new code. I then added a new "Export Chat" section to the sidebar, which includes "Download as PDF" and "Download as Word" buttons.
-2.  **Keyword Highlighting:**
-      * The user-driven keyword highlighting feature from your new code has been added.
-      * A "Keyword Highlight" text input now appears at the top of the sidebar.
-      * Your original `highlight_keywords` (for dates/numbers) has been replaced with the more advanced `highlight_with_style` function, which highlights user-provided terms.
-      * The chat display logic has been updated to use this new function.
-3.  **Improved OpenRouter API Call:** Your original `call_openrouter` function was replaced with the new one, which includes explicit `401 Unauthorized` error handling and the placeholder "cheating case" draft. The code that calls this function has been updated to pass the `sources` argument.
-4.  **Optimized Source Summaries:** The `summarize_source_with_llm` function has been updated to use the fast, 3-line *extractive* summary from your new code. This makes both the PDF/Word export and the in-chat source expander much faster, as they no longer make an LLM call for every single source.
-5.  **Kept Original Features:** Your app's core functionality remains the same:
-      * It still uses **`gTTS`** for audio (I did not add the JavaScript TTS).
-      * It still uses **Google Vision OCR** and the `fitz` PDF processing.
-      * It still has your advanced **Chat History Search**.
-      * It still follows your "select a prompt" workflow.
-6.  **UI & CSS:** The custom CSS from your new code has been added to improve the UI styling of chat bubbles and buttons.
-
-<!-- end list -->
-
-```python
 import os
 import streamlit as st
 import fitz  # PyMuPDF
@@ -1155,3 +1131,4 @@ if st.session_state.pending_prompts:
             st.session_state.pending_prompts = None
             st.rerun()
 ```
+
