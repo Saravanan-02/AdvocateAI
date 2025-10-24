@@ -169,20 +169,44 @@ def reciprocal_rank_fusion(results_list, k=60):
     return fused_results
 
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
-    # FIX: Use index.ntotal instead of len(index)
-    query_emb = embed_model.encode([query], convert_to_numpy=True)
-    distances, indices = index.search(query_emb, min(top_k * 4, index.ntotal))
-    semantic_results = [metadata[idx] for idx in indices[0] if idx < len(metadata)]
-    bm25_results = bm25_search(query, metadata, top_k=top_k * 4)
-    fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
-    pairs = [[query, c["text"]] for c in fused_candidates]
-    if not pairs:
+    # FIX: Proper error handling for FAISS search
+    if index is None or metadata is None or len(metadata) == 0:
         return "", []
-    scores = reranker_model.predict(pairs)
-    reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
-    top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
-    sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
-    return "\n\n".join(top_chunks), sources
+    
+    try:
+        query_emb = embed_model.encode([query], convert_to_numpy=True)
+        # FIX: Use min to avoid requesting more items than available in index
+        search_k = min(top_k * 4, index.ntotal)
+        if search_k == 0:
+            return "", []
+            
+        distances, indices = index.search(query_emb, search_k)
+        
+        # FIX: Handle case where indices might be empty
+        if len(indices) == 0 or len(indices[0]) == 0:
+            return "", []
+            
+        semantic_results = []
+        for idx in indices[0]:
+            if idx < len(metadata):  # Ensure index is within bounds
+                semantic_results.append(metadata[idx])
+        
+        bm25_results = bm25_search(query, metadata, top_k=top_k * 4)
+        fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
+        
+        if not fused_candidates:
+            return "", []
+            
+        pairs = [[query, c["text"]] for c in fused_candidates]
+        scores = reranker_model.predict(pairs)
+        reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
+        top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
+        sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
+        return "\n\n".join(top_chunks), sources
+        
+    except Exception as e:
+        st.error(f"Error in retrieval: {e}")
+        return "", []
 
 def highlight_keywords(text):
     text = re.sub(r'\b([A-Z][a-z]+)\b', r'**\1**', text)  # Names
@@ -279,12 +303,16 @@ def construct_final_prompt(question, rag_summary, uploaded_summary):
 def call_openrouter(model, prompt):
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-    response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
-    response.raise_for_status()
-    result = response.json()
-    answer = result["choices"][0]["message"]["content"]
-    tokens_used = result.get("usage", {}).get("total_tokens", 0)
-    return answer, tokens_used
+    try:
+        response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        answer = result["choices"][0]["message"]["content"]
+        tokens_used = result.get("usage", {}).get("total_tokens", 0)
+        return answer, tokens_used
+    except Exception as e:
+        st.error(f"Error calling OpenRouter: {e}")
+        return f"Error: Unable to get response from AI model. {e}", 0
 
 # ==========================
 # TEXT TO SPEECH
@@ -821,8 +849,8 @@ with st.sidebar:
     if current_messages:
         # Generate file names
         base_file_name = f"AdvocateAI_{current_chat_name.replace(' ', '_')[:20]}"
-        pdf_file_name = f"{base_file_name}.pdf"
-        word_file_name = f"{base_file_name}.docx"
+        pdf_file_name = f"{base_file_name}.pdf"  # FIX: Define pdf_file_name here
+        word_file_name = f"{base_file_name}.docx"  # FIX: Define word_file_name here
         
         # Generate file bytes
         pdf_content_bytes = generate_qna_content_pdf(current_messages, current_chat_name)
@@ -832,7 +860,7 @@ with st.sidebar:
     st.download_button(
         label="⬇️ Download Q&A as PDF", 
         data=pdf_content_bytes, 
-        file_name=pdf_file_name,
+        file_name=pdf_file_name if current_messages else "empty.pdf",  # FIX: Use defined variable
         mime="application/pdf", 
         use_container_width=True,
         disabled=(not pdf_content_bytes)
@@ -842,7 +870,7 @@ with st.sidebar:
     st.download_button(
         label="⬇️ Download Q&A as Word", 
         data=word_content_bytes, 
-        file_name=word_file_name,
+        file_name=word_file_name if current_messages else "empty.docx",  # FIX: Use defined variable
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
         use_container_width=True,
         disabled=(not word_content_bytes)
