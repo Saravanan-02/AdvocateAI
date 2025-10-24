@@ -70,6 +70,10 @@ def load_models_and_index():
             metadata = pickle.load(f)
         return embedding_model, reranker_model, index, metadata
     except FileNotFoundError:
+        st.error(f"Knowledge base files not found. Please ensure {INDEX_FILE} and {METADATA_FILE} exist.")
+        return embedding_model, reranker_model, None, None
+    except Exception as e:
+        st.error(f"Error loading knowledge base: {e}")
         return embedding_model, reranker_model, None, None
 
 # ==========================
@@ -138,6 +142,8 @@ def preprocess_text(text):
     return [w for w in tokens if w not in stop_words]
 
 def bm25_search(query, metadata, top_k=10):
+    if not metadata:
+        return []
     tokenized_corpus = [preprocess_text(m['text']) for m in metadata]
     bm25 = BM25Okapi(tokenized_corpus)
     tokenized_query = preprocess_text(query)
@@ -170,7 +176,8 @@ def reciprocal_rank_fusion(results_list, k=60):
 
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
     # FIX: Proper error handling for FAISS search
-    if index is None or metadata is None or len(metadata) == 0:
+    if index is None or metadata is None:
+        st.warning("Knowledge base not properly loaded. Please check if index files exist.")
         return "", []
     
     try:
@@ -658,8 +665,9 @@ def highlight_search_terms(text, search_terms):
 st.set_page_config(page_title="Advocate AI Optimized", layout="wide")
 embed_model, reranker_model, folder_index, folder_metadata = load_models_and_index()
 
-if folder_index is None:
-    st.error("Knowledge base not found. Run build_index_advanced.py")
+# FIX: Check both index and metadata
+if folder_index is None or folder_metadata is None:
+    st.error("Knowledge base not found. Please ensure 'faiss_advanced_index.bin' and 'metadata.pkl' files exist in the current directory.")
     st.stop()
 
 # Initialize session state
@@ -1057,29 +1065,33 @@ if st.session_state.pending_prompts:
     choice = st.radio("Select prompt:", st.session_state.pending_prompts, key="prompt_selector")
     
     if st.button("Confirm and Generate Response"):
-        # Retrieve context and generate response
-        rag_context_full, sources = retrieve_and_rerank(choice, folder_index, folder_metadata, embed_model,
-                                                        reranker_model, top_k=2)
-        uploaded_context_full = ""
-        if st.session_state.uploaded_pdfs_data:
-            uploaded_context_full = process_uploaded_pdfs(st.session_state.uploaded_pdfs_data, use_ocr=use_ocr_toggle)
+        # Retrieve context and generate response with proper error handling
+        try:
+            rag_context_full, sources = retrieve_and_rerank(choice, folder_index, folder_metadata, embed_model,
+                                                            reranker_model, top_k=2)
+            uploaded_context_full = ""
+            if st.session_state.uploaded_pdfs_data:
+                uploaded_context_full = process_uploaded_pdfs(st.session_state.uploaded_pdfs_data, use_ocr=use_ocr_toggle)
 
-        final_prompt = construct_final_prompt(choice, rag_context_full, uploaded_context_full)
-        answer, tokens = call_openrouter(model, final_prompt)
-        
-        # Update tokens and add assistant response
-        st.session_state.tokens_used += tokens
-        audio_bytes = text_to_audio(answer)
-        
-        assistant_message = {"role": "assistant", "content": answer, "sources": sources}
-        if audio_bytes:
-            assistant_message["audio"] = audio_bytes
-        
-        st.session_state.messages.append(assistant_message)
-        
-        # Update chat session
-        if st.session_state.active_chat:
-            st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages.copy()
-        
-        st.session_state.pending_prompts = None
-        st.rerun()
+            final_prompt = construct_final_prompt(choice, rag_context_full, uploaded_context_full)
+            answer, tokens = call_openrouter(model, final_prompt)
+            
+            # Update tokens and add assistant response
+            st.session_state.tokens_used += tokens
+            audio_bytes = text_to_audio(answer)
+            
+            assistant_message = {"role": "assistant", "content": answer, "sources": sources}
+            if audio_bytes:
+                assistant_message["audio"] = audio_bytes
+            
+            st.session_state.messages.append(assistant_message)
+            
+            # Update chat session
+            if st.session_state.active_chat:
+                st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages.copy()
+            
+            st.session_state.pending_prompts = None
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error generating response: {e}")
+            st.session_state.pending_prompts = None
