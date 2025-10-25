@@ -10,3 +10,6 @@ nltk
 python-docx
 reportlab
 torch
+PyPDF2
+python-docx
+
