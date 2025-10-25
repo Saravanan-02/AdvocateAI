@@ -32,6 +32,8 @@ try:
     from docx.shared import Pt, Inches
     from docx.enum.text import WD_PARAGRAPH_ALIGN
 except ImportError:
+    # This is NOT a code error. It means the library is missing from your environment.
+    # Run 'pip install python-docx' in your terminal to fix this.
     st.error("The 'python-docx' library is not installed. Please run 'pip install python-docx' to enable Word export.")
     if "Document" not in globals():
         st.stop()
@@ -61,18 +63,23 @@ except LookupError:
     nltk.download('punkt')
 
 # ==========================
-# CONFIG
+# CONFIG & API KEY
 # ==========================
-OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY")
 
-if not OPENROUTER_API_KEY:
-    st.error("OPENROUTER_API_KEY not found. Please add it to your Streamlit Secrets.")
-    st.info("Create a file at .streamlit/secrets.toml and add: OPENROUTER_API_KEY = 'your_key'")
-    st.stop()
+# --- CORRECTED API KEY HANDLING ---
+# 1. Try to get the key from Streamlit secrets (for deployment)
+# 2. If not found, fall back to environment variable (for local dev)
+OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
 
 BASE_URL = "https://openrouter.ai/api/v1"
 INDEX_FILE = "faiss_advanced_index.bin"
 METADATA_FILE = "metadata.pkl"
+
+# Stop the app if the key is not available
+if not OPENROUTER_API_KEY:
+    st.error("OPENROUTER_API_KEY not found. Please set it in your Streamlit secrets or environment variables.")
+    st.info("To set it in Streamlit Community Cloud, go to 'Settings' > 'Secrets' and add `OPENROUTER_API_KEY = 'your_key_here'`")
+    st.stop()
 
 # ==========================
 # JAVASCRIPT FOR NATIVE TTS
@@ -179,44 +186,19 @@ def reciprocal_rank_fusion(results_list, k=60):
     fused_results = [unique_items[doc_id] for doc_id, _ in sorted_items if doc_id in unique_items]
     return fused_results
 
-# --- THIS IS THE CRITICAL FIX ---
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
     query_emb = embed_model.encode([query], convert_to_numpy=True)
     distances, indices = index.search(query_emb, top_k * 4)
     semantic_results = [metadata[idx] for idx in indices[0] if idx < len(metadata)]
     bm25_results = bm25_search(query, metadata, top_k=top_k * 4)
     fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
-    
-    if not fused_candidates:
-        return "", []
-
     pairs = [[query, c["text"]] for c in fused_candidates]
-    scores = reranker_model.predict(pairs)
-    
-    reranked_with_scores = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)
-
-    # --- THE FIX ---
-    # Filter out results with a negative or zero relevance score.
-    # This stops irrelevant documents (junk) from being sent to the LLM.
-    RERANK_THRESHOLD = 0.0  # You can tune this; 0.0 is a good start.
-    
-    relevant_results = [
-        (candidate, score) for candidate, score in reranked_with_scores 
-        if score > RERANK_THRESHOLD
-    ]
-    
-    # Now take the top_k of the *relevant* results
-    top_relevant = relevant_results[:top_k]
-    
-    if not top_relevant:
-        # This is what will now happen for "POCSO"
-        # All results had a score < 0, so no relevant context was found.
+    if not pairs:
         return "", []
-
-    # Format output
-    top_chunks = [truncate_text(item[0]["text"], max_words=200) for item, score in top_relevant]
-    sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item, score in top_relevant]
-
+    scores = reranker_model.predict(pairs)
+    reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
+    top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
+    sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
     return "\n\n".join(top_chunks), sources
 
 def dynamic_query_generator(question):
@@ -266,75 +248,37 @@ def extract_text_from_pdfs(uploaded_files):
 # PROMPT CONSTRUCTION
 # ==========================
 def construct_final_prompt(question, rag_summary, uploaded_context_summary):
-    
-    rag_sources_found = bool(rag_summary.strip())
-    uploaded_sources_found = bool(uploaded_context_summary.strip())
-    context_found = rag_sources_found or uploaded_sources_found
+    rag_lines = rag_summary.strip().splitlines()
+    if not rag_lines:
+        knowledge_block = "No relevant knowledge found in the database."
+    else:
+        knowledge_block = "\n".join(rag_lines[:3]) 
+        
+    if not uploaded_context_summary:
+        uploaded_block = "No context provided from uploaded documents."
+    else:
+        uploaded_block = truncate_text(uploaded_context_summary, max_words=1500)
 
-    # --- Base instructions for all prompts ---
-    base_instructions = """
+    final_prompt = f"""
     Advocate AI: Answer the following question clearly, concisely, and formally.
     
     **Instructions:**
     1. Provide a professional, structured legal response based on the **Selected Question** below.
     2. **Crucially, maintain clear line breaks and use markdown (like bullet points or list numbering) for structure.**
     3. Do NOT include any initial greetings, intros, or headings. Start directly with the answer content.
-    """
-
-    if context_found:
-        # --- SCENARIO 1: CONTEXT IS FOUND ---
-        
-        # Set the knowledge blocks
-        if rag_sources_found:
-            knowledge_block = truncate_text(rag_summary, max_words=1500)
-        else:
-            knowledge_block = "No specific context found in the database."
-
-        if uploaded_sources_found:
-            uploaded_block = truncate_text(uploaded_context_summary, max_words=1500)
-        else:
-            uploaded_block = "No specific context provided from uploaded documents."
-
-        # Instructions for when context is present
-        context_instructions = """
-        4. You MUST base your answer *only* on the 'Knowledge' sections below. Prioritize 'Uploaded Docs'.
-        5. Cite references clearly if they are provided in the context, e.g., (Source: SourceFileName.pdf) or (Source: Uploaded Document).
-        """
-        
-        # Build the prompt WITH knowledge blocks
-        final_prompt = f"""
-        {base_instructions}
-        {context_instructions}
-        
-        **Selected Question:** {question}
-        
-        ---
-        **Knowledge (From Database):**
-        {knowledge_block}
-        
-        ---
-        **Knowledge (From Uploaded Docs):**
-        {uploaded_block}
-        """
+    4. You have two sources of information. Prioritize context from 'Uploaded Docs' if it is relevant.
+    5. Cite references clearly, e.g., (Source: SourceFileName.pdf) or (Source: Uploaded Document).
     
-    else:
-        # --- SCENARIO 2: NO CONTEXT IS FOUND (Your "POCSO" case) ---
-        
-        # Instructions for when no context is present
-        no_context_instructions = """
-        4. **You must answer the question using your general legal knowledge.**
-        5. Do NOT mention the knowledge base, do not cite sources, and do not refer to 'provided context'.
-        """
-
-        # Build the prompt WITHOUT any knowledge blocks
-        final_prompt = f"""
-        {base_instructions}
-        {no_context_instructions}
-        
-        **Selected Question:** {question}
-        """
-        # Note: The "Knowledge" blocks are completely omitted.
-
+    **Selected Question:** {question}
+    
+    ---
+    **Knowledge (From Database):**
+    {knowledge_block}
+    
+    ---
+    **Knowledge (From Uploaded Docs):**
+    {uploaded_block}
+    """
     return final_prompt.strip()
 
 # ==========================
@@ -345,7 +289,7 @@ def get_cheating_draft_placeholder(sources):
     if sources:
         source_citations = f"The intent to deceive (Source: {sources[0]['source']}) and the subsequent delivery of property (Source: {sources[0]['source']}) must be clearly established."
     return f"""
-**CRITICAL AUTHENTICATION ERROR (401)**. Please ensure your `OPENROUTER_API_KEY` is set correctly in your Streamlit Secrets.
+**CRITICAL AUTHENTICATION ERROR (401)**. Please ensure your `OPENROUTER_API_KEY` is set correctly.
 ---
 ### Placeholder Draft: Cheating (IPC Section 420)
 This is a structural draft for a Criminal Complaint (First Information Report/Private Complaint) for the offense of Cheating and Dishonest Inducement to Deliver Property, usually covered under **Section 420, Indian Penal Code (IPC)**.
@@ -357,7 +301,7 @@ def call_openrouter(model, prompt, sources=None):
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
     try:
-        response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=data)
+        response = requests.post(f"https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
         response.raise_for_status()
         result = response.json()
         answer = result["choices"][0]["message"]["content"]
@@ -366,10 +310,10 @@ def call_openrouter(model, prompt, sources=None):
     
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            st.error("Authentication Failed (401). Please check the OPENROUTER_API_KEY in your Streamlit Secrets.")
+            st.error("Authentication Failed (401). Please check the OPENROUTER_API_KEY.")
             if "cheating case" in prompt.lower() and sources is not None:
                 return get_cheating_draft_placeholder(sources), 100
-            return f"**LLM Error (401 Unauthorized):** Cannot connect. Please fix your API Key in Streamlit Secrets. {e}", 0
+            return f"**LLM Error (401 Unauthorized):** Cannot connect. Please fix your API Key. {e}", 0
         st.error(f"HTTP Error connecting to LLM: {e}")
         return f"Error connecting to LLM: {e}", 0
     except Exception as e:
@@ -418,6 +362,8 @@ def highlight_with_style(text, search_terms_raw):
         return text, found_keyword
         
     pattern = re.compile(r'(' + '|'.join(search_terms) + r')', re.IGNORECASE)
+    
+    # --- FIX: Changed highlight color from #ffff00 (yellow) to #ADD8E6 (light blue) ---
     highlight_style = 'background-color: #ADD8E6; color: black; border-radius: 3px; padding: 2px 4px; display: inline; font-weight: bold;'
     
     def replacer(match):
@@ -428,20 +374,22 @@ def highlight_with_style(text, search_terms_raw):
     highlighted_text = pattern.sub(replacer, text)
     return highlighted_text, found_keyword
 
+# --- NEW: Function to check keyword status *before* sidebar render ---
 def check_keywords_in_chat(messages, keyword_terms):
     """
     Loops through chat history to check if keywords exist.
     This runs *before* the sidebar is rendered to prevent the "Not Found" bug.
     """
     if not keyword_terms:
-        return True 
+        return True # Default to True to avoid showing "Not Found" when no terms are entered
     
     for message in messages:
         content = message["content"]
+        # Simple check is faster than regex for this
         for term in keyword_terms.split(','):
             if term.strip() and term.strip().lower() in content.lower():
-                return True
-    return False
+                return True # Found it
+    return False # Did not find it
 
 
 # ===================================================================
@@ -564,12 +512,8 @@ def generate_qna_content_word(messages, chat_name):
 # ==========================
 # STREAMLIT APP SETUP
 # ==========================
-st.markdown(inject_tts_javascript(), unsafe_allow_html=True) 
 st.set_page_config(page_title="Advocate AI Optimized", layout="wide")
-
-if not OPENROUTER_API_KEY:
-    st.stop()
-
+st.markdown(inject_tts_javascript(), unsafe_allow_html=True) 
 embed_model, reranker_model, folder_index, folder_metadata = load_models_and_index()
 
 if folder_index is None:
@@ -671,6 +615,7 @@ div[data-testid="stVerticalBlock"] .stButton>button[data-testid*="primary"] {{
 st.markdown(custom_css, unsafe_allow_html=True)
 
 
+# --- KEYWORD BUG FIX: Run check *before* sidebar is rendered ---
 if "keyword_highlight_input" in st.session_state:
     st.session_state.keyword_found = check_keywords_in_chat(
         st.session_state.messages, 
@@ -685,9 +630,11 @@ with st.sidebar:
     
     st.header("🔑 Keyword Highlight")
     keyword_search_input = st.text_input("Enter keywords (comma-separated)", key="keyword_highlight_input", placeholder="e.g., defense, doctrine, contract")
+    # The 'on_change' logic is handled by the top-level script rerun
     
     st.markdown("---") 
 
+    # --- FIX: This now reads the correctly-updated session state ---
     if not st.session_state.keyword_found and st.session_state.keyword_highlight_input:
         st.warning("⚠️ Keywords not found.", icon="🔍")
     elif st.session_state.keyword_highlight_input and st.session_state.messages:
@@ -763,7 +710,7 @@ with st.sidebar:
         word_content_bytes = generate_qna_content_word(current_messages, current_chat_name)
 
     st.download_button(label="⬇️ Download Q&A as PDF", data=pdf_content_bytes, file_name=pdf_file_name, mime="application/pdf", use_container_width=True, disabled=(not pdf_content_bytes))
-    st.download_button(label="⬇️ Download Q&A as Word", data=word_content_bytes, file_name=word_file_name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True, disabled=(not word_content_bytes))
+    st.download_button(label="⬇️ Download Q&Details as Word", data=word_content_bytes, file_name=word_file_name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True, disabled=(not word_content_bytes))
     
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.chat_sessions = {}
@@ -867,13 +814,13 @@ with chat_container:
                     unsafe_allow_html=True
                 )
 
+            # --- RENDER HIGHLIGHTS ---
             if keyword_terms:
                 highlighted_content, _ = highlight_with_style(content, keyword_terms)
                 st.markdown(highlighted_content, unsafe_allow_html=True)
             else:
                 st.markdown(content)
             
-            # --- FIX: Only show expander if sources list is not empty ---
             if message.get("sources"):
                 with st.expander("Show Sources (from Database)"):
                     for source in message["sources"]:
@@ -911,7 +858,8 @@ def generate_prompt_variations(prompt):
     if st.session_state.active_chat:
         st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
         
-    # The chat_input widget handles the rerun.
+    # --- FIX: Removed st.rerun() ---
+    # The chat_input widget handles the rerun automatically.
 
 
 def handle_selected_prompt(selected_prompt):
@@ -924,25 +872,18 @@ def handle_selected_prompt(selected_prompt):
         
         # RAG from Database
         all_sources = []
-        final_rag_context = ""
-        unique_sources = {}
         try:
-            # --- THIS FUNCTION NOW FILTERS IRRELEVANT JUNK ---
             chunks, sources = retrieve_and_rerank(selected_prompt, folder_index, folder_metadata, embed_model, reranker_model, top_k=3)
-            
             all_sources.extend(sources)
-            
-            for source in all_sources:
-                key = source['source'] + source['text'][:100]
-                if key not in unique_sources:
-                    unique_sources[key] = source
-            
-            # This will now be "" for queries like "POCSO"
-            final_rag_context = "\n\n".join([truncate_text(s['text'], max_words=200) for s in unique_sources.values()])
-            
         except Exception as e:
             st.warning(f"Database retrieval error: {e}")
-            unique_sources = {} # Ensure it's defined even on error
+
+        unique_sources = {}
+        for source in all_sources:
+            key = source['source'] + source['text'][:100]
+            if key not in unique_sources:
+                unique_sources[key] = source
+        final_rag_context = "\n\n".join([truncate_text(s['text'], max_words=200) for s in unique_sources.values()])
         
         # RAG from Uploaded PDFs
         uploaded_context_summary = ""
@@ -955,10 +896,7 @@ def handle_selected_prompt(selected_prompt):
                     pdf_search_results = bm25_search(selected_prompt, pdf_metadata, top_k=5)
                     uploaded_context_summary = "\n\n".join([res['text'] for res in pdf_search_results])
 
-        # --- This check will now correctly be FALSE for "POCSO" ---
-        context_was_found = bool(final_rag_context.strip()) or bool(uploaded_context_summary.strip())
-
-        # This will now correctly select the "no-context" prompt
+        # Construct Final Prompt
         final_prompt = construct_final_prompt(selected_prompt, final_rag_context, uploaded_context_summary)
         
         # LLM Call for Answer
@@ -976,25 +914,27 @@ def handle_selected_prompt(selected_prompt):
         assistant_message = {
             "role": "assistant",
             "content": llm_answer,
-            # --- This will correctly be [] for "POCSO" ---
-            "sources": list(unique_sources.values()) if context_was_found else [] 
+            "sources": list(unique_sources.values())
         }
         st.session_state.messages.append(assistant_message)
         
         if st.session_state.active_chat:
             st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
             
+    # --- FIX: Removed st.rerun() ---
     # The on_click callback from the button handles the rerun.
 
 # ==================================
 # MAIN CHAT INPUT & SUGGESTION UI
 # ==================================
 
+# --- NEW: Conditional UI for prompts ---
 if st.session_state.pending_prompts:
     st.caption("Select a prompt to continue:")
     
     labels = ["Original Question", "Refined Prompt", "Refined Prompt"]
     
+    # --- FIX: Removed st.columns to stack buttons vertically ---
     for i, prompt_text in enumerate(st.session_state.pending_prompts):
         button_label = f"**{labels[i]}**\n\n{prompt_text}"
         st.button(
@@ -1008,6 +948,7 @@ if st.session_state.pending_prompts:
 elif st.session_state.suggested_prompts:
     st.caption("Suggested Follow-ups:")
     
+    # --- FIX: Removed st.columns to stack buttons vertically ---
     for i, prompt_text in enumerate(st.session_state.suggested_prompts):
         st.button(
             prompt_text, 
@@ -1017,9 +958,9 @@ elif st.session_state.suggested_prompts:
             use_container_width=True
         )
 
+# --- Streamlit Chat Input (calls generate_prompt_variations) ---
 chat_input_disabled = bool(st.session_state.pending_prompts)
 if prompt := st.chat_input("Ask a legal question (e.g., 'What is the doctrine of Res Gestae?')", disabled=chat_input_disabled):
     generate_prompt_variations(prompt)
-    st.rerun() # Explicitly rerun after chat input to show pending prompts
 
 # --- End of Streamlit App ---
