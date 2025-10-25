@@ -26,20 +26,16 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.units import inch
 
 # --- WORD (.docx) Dependencies ---
-# You must run: pip install python-docx
 try:
     from docx import Document
     from docx.shared import Pt, Inches
     from docx.enum.text import WD_PARAGRAPH_ALIGN
 except ImportError:
-    # This is NOT a code error. It means the library is missing from your environment.
-    # Run 'pip install python-docx' in your terminal to fix this.
     st.error("The 'python-docx' library is not installed. Please run 'pip install python-docx' to enable Word export.")
     if "Document" not in globals():
         st.stop()
 
 # --- PDF Text Extraction Dependencies ---
-# You must run: pip install PyPDF2
 try:
     import PyPDF2
     from PyPDF2.errors import PdfReadError
@@ -66,10 +62,16 @@ except LookupError:
 # CONFIG & API KEY
 # ==========================
 
-# --- CORRECTED API KEY HANDLING ---
-# 1. Try to get the key from Streamlit secrets (for deployment)
-# 2. If not found, fall back to environment variable (for local dev)
-OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+# --- IMPROVED API KEY HANDLING ---
+# Try multiple sources in order: secrets -> environment -> None
+OPENROUTER_API_KEY = None
+try:
+    OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY")
+except:
+    pass
+
+if not OPENROUTER_API_KEY:
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 BASE_URL = "https://openrouter.ai/api/v1"
 INDEX_FILE = "faiss_advanced_index.bin"
@@ -301,7 +303,7 @@ def call_openrouter(model, prompt, sources=None):
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
     try:
-        response = requests.post(f"https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
+        response = requests.post(f"https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
         response.raise_for_status()
         result = response.json()
         answer = result["choices"][0]["message"]["content"]
@@ -316,6 +318,9 @@ def call_openrouter(model, prompt, sources=None):
             return f"**LLM Error (401 Unauthorized):** Cannot connect. Please fix your API Key. {e}", 0
         st.error(f"HTTP Error connecting to LLM: {e}")
         return f"Error connecting to LLM: {e}", 0
+    except requests.exceptions.Timeout:
+        st.error("Request timed out. Please try again.")
+        return "Error: Request timed out.", 0
     except Exception as e:
         st.error(f"Error connecting to LLM: {e}")
         return f"Error connecting to LLM: {e}", 0
@@ -363,7 +368,6 @@ def highlight_with_style(text, search_terms_raw):
         
     pattern = re.compile(r'(' + '|'.join(search_terms) + r')', re.IGNORECASE)
     
-    # --- FIX: Changed highlight color from #ffff00 (yellow) to #ADD8E6 (light blue) ---
     highlight_style = 'background-color: #ADD8E6; color: black; border-radius: 3px; padding: 2px 4px; display: inline; font-weight: bold;'
     
     def replacer(match):
@@ -374,22 +378,20 @@ def highlight_with_style(text, search_terms_raw):
     highlighted_text = pattern.sub(replacer, text)
     return highlighted_text, found_keyword
 
-# --- NEW: Function to check keyword status *before* sidebar render ---
 def check_keywords_in_chat(messages, keyword_terms):
     """
     Loops through chat history to check if keywords exist.
     This runs *before* the sidebar is rendered to prevent the "Not Found" bug.
     """
     if not keyword_terms:
-        return True # Default to True to avoid showing "Not Found" when no terms are entered
+        return True
     
     for message in messages:
         content = message["content"]
-        # Simple check is faster than regex for this
         for term in keyword_terms.split(','):
             if term.strip() and term.strip().lower() in content.lower():
-                return True # Found it
-    return False # Did not find it
+                return True
+    return False
 
 
 # ===================================================================
@@ -543,11 +545,11 @@ custom_css = f"""
     transition: all 0.2s ease-in-out;
     margin-top: 5px;
     height: 40px;
-    border: 1px solid #ccc; /* Default border */
+    border: 1px solid #ccc;
 }}
 .stButton>button:hover {{ 
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); 
-    border: 1px solid #1e3c72; /* Hover border */
+    border: 1px solid #1e3c72;
 }}
 
 /* Primary button for Active Chat Session */
@@ -587,17 +589,17 @@ div[data-testid="chat-message-container"]:has(div.st-emotion-cache-1c7v0l):nth-c
     font-size: 10px;
     padding: 2px 5px;
     height: 25px;
-    margin-bottom: 10px; /* Space between button and text */
+    margin-bottom: 10px;
 }}
 
 /* Suggestion/Pending Button Styling */
 div[data-testid="stVerticalBlock"] .stButton>button {{
-    height: 80px; /* Taller buttons for suggestions */
-    white-space: normal; /* Allow text wrapping */
+    height: 80px;
+    white-space: normal;
     text-align: left;
     background-color: #f0f2f6;
     border: 1px solid #ccc;
-    margin-bottom: 5px; /* Space between vertical buttons */
+    margin-bottom: 5px;
 }}
 div[data-testid="stVerticalBlock"] .stButton>button:hover {{
     background-color: #e6f0ff;
@@ -605,10 +607,10 @@ div[data-testid="stVerticalBlock"] .stButton>button:hover {{
 }}
 /* Primary suggestion button */
 div[data-testid="stVerticalBlock"] .stButton>button[data-testid*="primary"] {{
-    background-color: #e6f0ff; /* Lighter blue for primary suggestion */
+    background-color: #e6f0ff;
     border-color: #1e3c72;
     color: #1e3c72;
-    font-weight: normal; /* Kept normal for readability */
+    font-weight: normal;
 }}
 </style>
 """
@@ -617,350 +619,4 @@ st.markdown(custom_css, unsafe_allow_html=True)
 
 # --- KEYWORD BUG FIX: Run check *before* sidebar is rendered ---
 if "keyword_highlight_input" in st.session_state:
-    st.session_state.keyword_found = check_keywords_in_chat(
-        st.session_state.messages, 
-        st.session_state.keyword_highlight_input
-    )
-
-
-# ==========================
-# SIDEBAR 
-# ==========================
-with st.sidebar:
-    
-    st.header("🔑 Keyword Highlight")
-    keyword_search_input = st.text_input("Enter keywords (comma-separated)", key="keyword_highlight_input", placeholder="e.g., defense, doctrine, contract")
-    # The 'on_change' logic is handled by the top-level script rerun
-    
-    st.markdown("---") 
-
-    # --- FIX: This now reads the correctly-updated session state ---
-    if not st.session_state.keyword_found and st.session_state.keyword_highlight_input:
-        st.warning("⚠️ Keywords not found.", icon="🔍")
-    elif st.session_state.keyword_highlight_input and st.session_state.messages:
-        st.success("Keywords found.", icon="✨")
-
-    st.markdown("---") 
-
-    st.header("💬 Chat History")
-    if st.button("➕ New Chat", use_container_width=True):
-        chat_id = f"chat_{len(st.session_state.chat_sessions) + 1}_{random.randint(1000,9999)}"
-        st.session_state.chat_sessions[chat_id] = {"name": "New Chat", "messages": [], "created_at": datetime.now()}
-        st.session_state.active_chat = chat_id
-        st.session_state.messages = []
-        st.session_state.keyword_found = True
-        st.session_state.suggested_prompts = []
-        st.session_state.pending_prompts = []
-        st.rerun()
-
-    st.write("**Your Chats:**")
-    if not st.session_state.chat_sessions:
-        st.info("No chats yet.")
-    else:
-        sorted_chats = sorted(st.session_state.chat_sessions.items(), key=lambda x: x[1].get('created_at', datetime.min), reverse=True)
-        for chat_id, session in sorted_chats:
-            is_active = st.session_state.active_chat == chat_id
-            chat_col1, chat_col2 = st.columns([4, 1])
-            with chat_col1:
-                button_type = "primary" if is_active else "secondary"
-                if st.button(session["name"], key=f"chat_btn_{chat_id}", use_container_width=True, type=button_type):
-                    st.session_state.active_chat = chat_id
-                    st.session_state.messages = session["messages"]
-                    st.session_state.keyword_found = True
-                    st.session_state.suggested_prompts = []
-                    st.session_state.pending_prompts = []
-                    st.rerun()
-            with chat_col2:
-                with st.popover("⋮"):
-                    new_name = st.text_input("Rename chat", value=session["name"], key=f"rename_{chat_id}")
-                    if st.button("Save", key=f"save_{chat_id}"):
-                        st.session_state.chat_sessions[chat_id]["name"] = new_name
-                        st.rerun()
-                    if st.button("Delete", key=f"delete_{chat_id}"):
-                        del st.session_state.chat_sessions[chat_id]
-                        if st.session_state.active_chat == chat_id:
-                            st.session_state.active_chat = None
-                            st.session_state.messages = []
-                            st.session_state.keyword_found = True
-                            st.session_state.suggested_prompts = []
-                            st.session_state.pending_prompts = []
-                        st.rerun()
-    st.markdown("---")
-
-    # --- DOWNLOAD & CLEAR HISTORY ---
-    pdf_content_bytes = b''
-    word_content_bytes = b''
-    pdf_file_name = "AdvocateAI_Session.pdf"
-    word_file_name = "AdvocateAI_Session.docx"
-    current_messages = []
-    current_chat_name = "Current_Unsaved_Chat"
-
-    if st.session_state.active_chat and st.session_state.active_chat in st.session_state.chat_sessions:
-        current_chat = st.session_state.chat_sessions[st.session_state.active_chat]
-        current_chat_name = current_chat["name"]
-        current_messages = current_chat["messages"]
-    elif st.session_state.messages:
-        current_messages = st.session_state.messages
-
-    if current_messages:
-        base_file_name = f"AdvocateAI_{current_chat_name.replace(' ', '_')[:20]}"
-        pdf_file_name = f"{base_file_name}.pdf"
-        word_file_name = f"{base_file_name}.docx"
-        pdf_content_bytes = generate_qna_content_pdf(current_messages, current_chat_name)
-        word_content_bytes = generate_qna_content_word(current_messages, current_chat_name)
-
-    st.download_button(label="⬇️ Download Q&A as PDF", data=pdf_content_bytes, file_name=pdf_file_name, mime="application/pdf", use_container_width=True, disabled=(not pdf_content_bytes))
-    st.download_button(label="⬇️ Download Q&Details as Word", data=word_content_bytes, file_name=word_file_name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True, disabled=(not word_content_bytes))
-    
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
-        st.session_state.chat_sessions = {}
-        st.session_state.active_chat = None
-        st.session_state.messages = []
-        st.session_state.keyword_found = True
-        st.session_state.suggested_prompts = []
-        st.session_state.pending_prompts = []
-        st.rerun()
-    st.markdown("---")
-    
-    # --- MODEL & UPLOAD SETTINGS ---
-    st.markdown("""
-    <div style="display: flex; align-items: center; margin-bottom: 20px;">
-        <div style="
-            display: flex; 
-            align-items: center; 
-            justify-content: center; 
-            height: 50px; 
-            width: 50px; 
-            border-radius: 8px; 
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-            color: white; 
-            font-size: 24px; 
-            margin-right: 12px;
-            border: 2px solid #d4af37;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-        ">⚖️</div>
-        <div>
-            <h3 style="margin: 0; color: #1e3c72; font-weight: bold;">Advocate AI Pro</h3>
-            <p style="margin: 0; font-size: 12px; color: #666;">Legal Research Assistant</p>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.session_state.selected_model = st.selectbox("Select Model", [
-        "openai/gpt-5", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro",
-        "x-ai/grok-code-fast-1", "google/gemini-2.5-flash", 
-        "google/gemini-2.5-flash-lite", "openai/gpt-5-mini"
-    ], index=0)
-    
-    st.success(f"Knowledge Base loaded with {folder_index.ntotal} chunks", icon="✅")
-    
-    uploaded_pdfs = st.file_uploader("Upload PDFs to use as context", type=["pdf"], accept_multiple_files=True)
-    if uploaded_pdfs:
-        st.session_state.uploaded_pdfs_data = uploaded_pdfs
-        st.info(f"{len(uploaded_pdfs)} PDF(s) loaded. They will be used as context.")
-    elif st.session_state.uploaded_pdfs_data:
-        st.session_state.uploaded_pdfs_data = None
-        
-    st.markdown("---")
-
-# ==========================
-# MAIN CHAT INTERFACE
-# ==========================
-st.markdown(f"""
-<div style="display: flex; align-items: center; margin-bottom: 20px; padding: 20px; background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); border-radius: 10px; border-left: 5px solid #d4af37;">
-    <div style="
-        display: flex; 
-        align-items: center; 
-        justify-content: center; 
-        height: 70px; 
-        width: 70px; 
-        border-radius: 10px; 
-        background: white; 
-        color: #1e3c72; 
-        font-size: 32px; 
-        margin-right: 20px;
-        border: 3px solid #d4af37;
-        box-shadow: 0 6px 12px rgba(0,0,0,0.15);
-    ">⚖️</div>
-    <div>
-        <h1 style="margin: 0; color: white; font-weight: 700; font-size: 2.5rem;">Legal Research Assistant</h1>
-        <p style="margin: 5px 0 0 0; color: #f0f2f6; font-size: 1.1rem; font-weight: 400;">
-            Professional Legal Analysis & Case Research
-        </p>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-if st.session_state.active_chat and st.session_state.active_chat in st.session_state.chat_sessions:
-    current_chat_name = st.session_state.chat_sessions[st.session_state.active_chat]["name"]
-    st.subheader(f"💬 {current_chat_name}")
-
-keyword_terms = st.session_state.keyword_highlight_input
-
-chat_container = st.container()
-with chat_container:
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            content = message["content"]
-            
-            split_point = "Writ Petition under Article 226 of the Constitution of India"
-            if content.count(split_point) > 1:
-                content = content.split(split_point, 1)[0] + split_point + content.split(split_point, 2)[-1]
-            
-            if message["role"] == "assistant":
-                js_safe_content = content.replace("'", "\\'").replace('\n', ' ')
-                st.markdown(
-                    f'<button onclick="speakText(\'{js_safe_content}\')" class="stButton secondary">🔊 Read Aloud</button>',
-                    unsafe_allow_html=True
-                )
-
-            # --- RENDER HIGHLIGHTS ---
-            if keyword_terms:
-                highlighted_content, _ = highlight_with_style(content, keyword_terms)
-                st.markdown(highlighted_content, unsafe_allow_html=True)
-            else:
-                st.markdown(content)
-            
-            if message.get("sources"):
-                with st.expander("Show Sources (from Database)"):
-                    for source in message["sources"]:
-                        llm_summary = summarize_source_with_llm(source["text"], model=st.session_state.selected_model) 
-                        st.markdown(f"**Source:** `{source['source']}`")
-                        st.markdown(f"**Snippet (3 Lines):** {llm_summary}")
-    
-    if st.session_state.tokens_used > 0:
-        st.markdown(f"---")
-        st.caption(f"Total tokens used in this session: **{st.session_state.tokens_used}**")
-
-# ==================================
-# NEW PROMPT WORKFLOW FUNCTIONS
-# ==================================
-
-def generate_prompt_variations(prompt):
-    """
-    Called by chat_input. Generates prompts and stores them in 'pending_prompts'.
-    """
-    st.session_state.suggested_prompts = []
-    
-    if not st.session_state.active_chat:
-        chat_id = f"chat_{len(st.session_state.chat_sessions) + 1}_{random.randint(1000,9999)}"
-        new_chat_name = prompt[:30].strip() + "..." if len(prompt) > 30 else prompt.strip()
-        st.session_state.chat_sessions[chat_id] = {"name": new_chat_name, "messages": [], "created_at": datetime.now()}
-        st.session_state.active_chat = chat_id
-        st.session_state.messages = st.session_state.chat_sessions[chat_id]["messages"]
-    
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    
-    with st.spinner("Generating query variations..."):
-        variations = dynamic_query_generator(prompt)
-        st.session_state.pending_prompts = variations
-        
-    if st.session_state.active_chat:
-        st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
-        
-    # --- FIX: Removed st.rerun() ---
-    # The chat_input widget handles the rerun automatically.
-
-
-def handle_selected_prompt(selected_prompt):
-    """
-    Called by button click. Clears pending prompts and runs the full RAG pipeline.
-    """
-    st.session_state.pending_prompts = []
-
-    with st.spinner("⚖️ Conducting research..."):
-        
-        # RAG from Database
-        all_sources = []
-        try:
-            chunks, sources = retrieve_and_rerank(selected_prompt, folder_index, folder_metadata, embed_model, reranker_model, top_k=3)
-            all_sources.extend(sources)
-        except Exception as e:
-            st.warning(f"Database retrieval error: {e}")
-
-        unique_sources = {}
-        for source in all_sources:
-            key = source['source'] + source['text'][:100]
-            if key not in unique_sources:
-                unique_sources[key] = source
-        final_rag_context = "\n\n".join([truncate_text(s['text'], max_words=200) for s in unique_sources.values()])
-        
-        # RAG from Uploaded PDFs
-        uploaded_context_summary = ""
-        if st.session_state.uploaded_pdfs_data:
-            full_pdf_text = extract_text_from_pdfs(st.session_state.uploaded_pdfs_data)
-            if full_pdf_text:
-                pdf_chunks = full_pdf_text.split('\n\n')
-                pdf_metadata = [{'text': chunk, 'source': 'Uploaded Document'} for chunk in pdf_chunks if chunk.strip()]
-                if pdf_metadata:
-                    pdf_search_results = bm25_search(selected_prompt, pdf_metadata, top_k=5)
-                    uploaded_context_summary = "\n\n".join([res['text'] for res in pdf_search_results])
-
-        # Construct Final Prompt
-        final_prompt = construct_final_prompt(selected_prompt, final_rag_context, uploaded_context_summary)
-        
-        # LLM Call for Answer
-        llm_answer, tokens_used = call_openrouter(st.session_state.selected_model, final_prompt, list(unique_sources.values()))
-        st.session_state.tokens_used += tokens_used
-
-        # LLM Call for Follow-up Suggestions
-        try:
-            suggested_prompts = generate_suggested_prompts(selected_prompt, llm_answer)
-            st.session_state.suggested_prompts = suggested_prompts
-        except Exception as e:
-            st.warning(f"Could not generate suggestions: {e}")
-
-        # Add assistant message to state
-        assistant_message = {
-            "role": "assistant",
-            "content": llm_answer,
-            "sources": list(unique_sources.values())
-        }
-        st.session_state.messages.append(assistant_message)
-        
-        if st.session_state.active_chat:
-            st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
-            
-    # --- FIX: Removed st.rerun() ---
-    # The on_click callback from the button handles the rerun.
-
-# ==================================
-# MAIN CHAT INPUT & SUGGESTION UI
-# ==================================
-
-# --- NEW: Conditional UI for prompts ---
-if st.session_state.pending_prompts:
-    st.caption("Select a prompt to continue:")
-    
-    labels = ["Original Question", "Refined Prompt", "Refined Prompt"]
-    
-    # --- FIX: Removed st.columns to stack buttons vertically ---
-    for i, prompt_text in enumerate(st.session_state.pending_prompts):
-        button_label = f"**{labels[i]}**\n\n{prompt_text}"
-        st.button(
-            button_label, 
-            key=f"pending_{i}",
-            on_click=handle_selected_prompt,
-            args=(prompt_text,),
-            use_container_width=True,
-            type="primary"
-        )
-elif st.session_state.suggested_prompts:
-    st.caption("Suggested Follow-ups:")
-    
-    # --- FIX: Removed st.columns to stack buttons vertically ---
-    for i, prompt_text in enumerate(st.session_state.suggested_prompts):
-        st.button(
-            prompt_text, 
-            key=f"suggestion_{i}",
-            on_click=generate_prompt_variations,
-            args=(prompt_text,),
-            use_container_width=True
-        )
-
-# --- Streamlit Chat Input (calls generate_prompt_variations) ---
-chat_input_disabled = bool(st.session_state.pending_prompts)
-if prompt := st.chat_input("Ask a legal question (e.g., 'What is the doctrine of Res Gestae?')", disabled=chat_input_disabled):
-    generate_prompt_variations(prompt)
-
-# --- End of Streamlit App ---
+    st.session_state.keyword_found = check_keywords
