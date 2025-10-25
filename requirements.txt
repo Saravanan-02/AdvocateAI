@@ -7,9 +7,9 @@ sentence-transformers
 gTTS
 rank-bm25
 nltk
-python-docx
 reportlab
 torch
 PyPDF2
 python-docx
+
 
