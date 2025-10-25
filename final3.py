@@ -63,9 +63,22 @@ except LookupError:
     nltk.download('punkt')
 
 # ==========================
-# CONFIG
+# CONFIG - SECURE API KEY HANDLING
 # ==========================
-OPENROUTER_API_KEY = "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"
+try:
+    OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
+except (KeyError, FileNotFoundError):
+    st.error("""
+    ⚠️ API Key not found. Please configure your secrets:
+    
+    1. Make sure you have a `.streamlit/secrets.toml` file
+    2. Add: OPENROUTER_API_KEY = "your-actual-key-here"
+    3. For Streamlit Cloud: Add the secret in your app settings
+    
+    If you're seeing this in production, check your Streamlit app secrets configuration.
+    """)
+    st.stop()
+
 BASE_URL = "https://openrouter.ai/api/v1"
 INDEX_FILE = "faiss_advanced_index.bin"
 METADATA_FILE = "metadata.pkl"
@@ -299,10 +312,10 @@ def call_openrouter(model, prompt, sources=None):
     
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            st.error("Authentication Failed (401). Please check the OPENROUTER_API_KEY.")
+            st.error("Authentication Failed (401). Please check the OPENROUTER_API_KEY in your secrets.")
             if "cheating case" in prompt.lower() and sources is not None:
                 return get_cheating_draft_placeholder(sources), 100
-            return f"**LLM Error (401 Unauthorized):** Cannot connect. Please fix your API Key. {e}", 0
+            return f"**LLM Error (401 Unauthorized):** Cannot connect. Please check your API Key configuration. {e}", 0
         st.error(f"HTTP Error connecting to LLM: {e}")
         return f"Error connecting to LLM: {e}", 0
     except Exception as e:
