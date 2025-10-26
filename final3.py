@@ -29,20 +29,20 @@ from reportlab.lib.units import inch
 try:
     from docx import Document
     from docx.shared import Pt, Inches
-    from docx.enum.text import WD_PARAGRAPH_ALIGN
+    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT as WD_ALIGN
+    DOCX_AVAILABLE = True
 except ImportError:
-    st.error("The 'python-docx' library is not installed. Please run 'pip install python-docx' to enable Word export.")
-    if "Document" not in globals():
-        st.stop()
+    DOCX_AVAILABLE = False
+    st.warning("⚠️ Word export unavailable. Install 'python-docx' to enable this feature.", icon="📄")
 
 # --- PDF Text Extraction Dependencies ---
 try:
     import PyPDF2
     from PyPDF2.errors import PdfReadError
+    PYPDF2_AVAILABLE = True
 except ImportError:
-    st.error("The 'PyPDF2' library is not installed. Please run 'pip install PyPDF2' to enable PDF processing.")
-    if "PyPDF2" not in globals():
-        st.stop()
+    PYPDF2_AVAILABLE = False
+    st.warning("⚠️ PDF upload unavailable. Install 'PyPDF2' to enable this feature.", icon="📄")
 
 
 # ==========================
@@ -51,12 +51,12 @@ except ImportError:
 try:
     nltk.data.find('corpora/stopwords')
 except LookupError:
-    nltk.download('stopwords')
+    nltk.download('stopwords', quiet=True)
 
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
-    nltk.download('punkt')
+    nltk.download('punkt', quiet=True)
 
 # ==========================
 # CONFIG & API KEY
@@ -188,19 +188,35 @@ def reciprocal_rank_fusion(results_list, k=60):
     return fused_results
 
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
-    query_emb = embed_model.encode([query], convert_to_numpy=True)
-    distances, indices = index.search(query_emb, top_k * 4)
-    semantic_results = [metadata[idx] for idx in indices[0] if idx < len(metadata)]
-    bm25_results = bm25_search(query, metadata, top_k=top_k * 4)
-    fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
-    pairs = [[query, c["text"]] for c in fused_candidates]
-    if not pairs:
+    """Fixed version with proper FAISS handling"""
+    try:
+        query_emb = embed_model.encode([query], convert_to_numpy=True)
+        
+        # Safe search with proper error handling
+        search_k = min(top_k * 4, index.ntotal)
+        distances, indices = index.search(query_emb, search_k)
+        
+        # Filter valid indices
+        semantic_results = []
+        for idx in indices[0]:
+            if 0 <= idx < len(metadata):
+                semantic_results.append(metadata[idx])
+        
+        bm25_results = bm25_search(query, metadata, top_k=search_k)
+        fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
+        
+        pairs = [[query, c["text"]] for c in fused_candidates]
+        if not pairs:
+            return "", []
+        
+        scores = reranker_model.predict(pairs)
+        reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
+        top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
+        sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
+        return "\n\n".join(top_chunks), sources
+    except Exception as e:
+        st.error(f"Retrieval error: {str(e)}")
         return "", []
-    scores = reranker_model.predict(pairs)
-    reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
-    top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
-    sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
-    return "\n\n".join(top_chunks), sources
 
 def dynamic_query_generator(question):
     """Generates three distinct prompt variations for legal research."""
@@ -227,7 +243,7 @@ def dynamic_query_generator(question):
 
 @st.cache_data(ttl=600)
 def extract_text_from_pdfs(uploaded_files):
-    if not uploaded_files:
+    if not uploaded_files or not PYPDF2_AVAILABLE:
         return ""
     all_text = []
     with st.spinner(f"Processing {len(uploaded_files)} PDF(s)..."):
@@ -285,19 +301,6 @@ def construct_final_prompt(question, rag_summary, uploaded_context_summary):
 # ==========================
 # LLM API CALL
 # ==========================
-def get_cheating_draft_placeholder(sources):
-    source_citations = ""
-    if sources:
-        source_citations = f"The intent to deceive (Source: {sources[0]['source']}) and the subsequent delivery of property (Source: {sources[0]['source']}) must be clearly established."
-    return f"""
-**CRITICAL AUTHENTICATION ERROR (401)**. Please ensure your `OPENROUTER_API_KEY` is set correctly.
----
-### Placeholder Draft: Cheating (IPC Section 420)
-This is a structural draft for a Criminal Complaint (First Information Report/Private Complaint) for the offense of Cheating and Dishonest Inducement to Deliver Property, usually covered under **Section 420, Indian Penal Code (IPC)**.
-... (rest of placeholder) ...
-{source_citations} Always ensure all oral representations, documents, and money transfer records are attached as evidence (Annexures).
-"""
-
 def call_openrouter(model, prompt, sources=None):
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
@@ -312,8 +315,6 @@ def call_openrouter(model, prompt, sources=None):
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
             st.error("Authentication Failed (401). Please check the OPENROUTER_API_KEY.")
-            if "cheating case" in prompt.lower() and sources is not None:
-                return get_cheating_draft_placeholder(sources), 100
             return f"**LLM Error (401 Unauthorized):** Cannot connect. Please fix your API Key. {e}", 0
         st.error(f"HTTP Error connecting to LLM: {e}")
         return f"Error connecting to LLM: {e}", 0
@@ -380,7 +381,6 @@ def highlight_with_style(text, search_terms_raw):
 def check_keywords_in_chat(messages, keyword_terms):
     """
     Loops through chat history to check if keywords exist.
-    This runs *before* the sidebar is rendered to prevent the "Not Found" bug.
     """
     if not keyword_terms:
         return True
@@ -467,6 +467,9 @@ def generate_qna_content_pdf(messages, chat_name):
         return b""
 
 def generate_qna_content_word(messages, chat_name):
+    if not DOCX_AVAILABLE:
+        return b""
+    
     document = Document()
     style = document.styles['Normal']
     font = style.font
@@ -531,6 +534,7 @@ if "selected_model" not in st.session_state: st.session_state.selected_model = "
 if "keyword_found" not in st.session_state: st.session_state.keyword_found = True
 if "suggested_prompts" not in st.session_state: st.session_state.suggested_prompts = []
 if "pending_prompts" not in st.session_state: st.session_state.pending_prompts = []
+if "processing" not in st.session_state: st.session_state.processing = False
 
 
 # Inject Custom CSS
@@ -538,6 +542,45 @@ custom_css = f"""
 <style>
 /* Base UI Cleanup */
 .main {{ padding-top: 20px; }}
+
+/* Professional Prompt Card Styling */
+.prompt-card {{
+    background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+    border: 2px solid #e0e0e0;
+    border-radius: 12px;
+    padding: 20px;
+    margin: 10px 0;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
+    transition: all 0.3s ease;
+    cursor: pointer;
+}}
+.prompt-card:hover {{
+    border-color: #1e3c72;
+    box-shadow: 0 6px 12px rgba(30, 60, 114, 0.15);
+    transform: translateY(-2px);
+}}
+.prompt-card.original {{
+    border-left: 5px solid #d4af37;
+    background: linear-gradient(135deg, #fffef7 0%, #faf8f0 100%);
+}}
+.prompt-card.refined {{
+    border-left: 5px solid #1e3c72;
+}}
+.prompt-label {{
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    margin-bottom: 8px;
+}}
+.prompt-text {{
+    font-size: 15px;
+    color: #1a1a1a;
+    line-height: 1.6;
+    font-weight: 500;
+}}
+
 /* Sidebar Chat Button Styling */
 .stButton>button {{
     border-radius: 8px;
@@ -557,27 +600,12 @@ custom_css = f"""
     color: white;
     border: 1px solid #1e3c72;
 }}
-/* Secondary button for inactive chats and suggestions */
-.stButton[data-testid*="secondary"]>button {{
-    background-color: white;
-    color: #333;
-    border: 1px solid #ccc;
-}}
-/* Chat Message Bubbles (User/Assistant differentiation) */
+
+/* Chat Message Bubbles */
 div[data-testid="chat-message-container"] {{
     padding: 10px;
     border-radius: 10px;
     margin-bottom: 10px;
-}}
-/* User Message Bubble */
-div[data-testid="chat-message-container"]:has(div.st-emotion-cache-1c7v0l):nth-child(even) {{
-    background-color: #e6f0ff !important;
-    border-left: 5px solid #1e3c72;
-}}
-/* Assistant Message Bubble */
-div[data-testid="chat-message-container"]:has(div.st-emotion-cache-1c7v0l):nth-child(odd) {{
-    background-color: #f0f2f6 !important;
-    border-right: 5px solid #d4af37;
 }}
 
 /* TTS Button Styling */
@@ -591,25 +619,15 @@ div[data-testid="chat-message-container"]:has(div.st-emotion-cache-1c7v0l):nth-c
     margin-bottom: 10px;
 }}
 
-/* Suggestion/Pending Button Styling */
-div[data-testid="stVerticalBlock"] .stButton>button {{
-    height: 80px;
-    white-space: normal;
-    text-align: left;
-    background-color: #f0f2f6;
-    border: 1px solid #ccc;
-    margin-bottom: 5px;
+/* Loading Animation */
+@keyframes pulse {{
+    0%, 100% {{ opacity: 1; }}
+    50% {{ opacity: 0.5; }}
 }}
-div[data-testid="stVerticalBlock"] .stButton>button:hover {{
-    background-color: #e6f0ff;
-    border-color: #1e3c72;
-}}
-/* Primary suggestion button */
-div[data-testid="stVerticalBlock"] .stButton>button[data-testid*="primary"] {{
-    background-color: #e6f0ff;
-    border-color: #1e3c72;
+.processing-indicator {{
+    animation: pulse 1.5s ease-in-out infinite;
     color: #1e3c72;
-    font-weight: normal;
+    font-weight: 600;
 }}
 </style>
 """
@@ -706,10 +724,13 @@ with st.sidebar:
         pdf_file_name = f"{base_file_name}.pdf"
         word_file_name = f"{base_file_name}.docx"
         pdf_content_bytes = generate_qna_content_pdf(current_messages, current_chat_name)
-        word_content_bytes = generate_qna_content_word(current_messages, current_chat_name)
+        if DOCX_AVAILABLE:
+            word_content_bytes = generate_qna_content_word(current_messages, current_chat_name)
 
     st.download_button(label="⬇️ Download Q&A as PDF", data=pdf_content_bytes, file_name=pdf_file_name, mime="application/pdf", use_container_width=True, disabled=(not pdf_content_bytes))
-    st.download_button(label="⬇️ Download Q&Details as Word", data=word_content_bytes, file_name=word_file_name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True, disabled=(not word_content_bytes))
+    
+    if DOCX_AVAILABLE:
+        st.download_button(label="⬇️ Download Q&A as Word", data=word_content_bytes, file_name=word_file_name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", use_container_width=True, disabled=(not word_content_bytes))
     
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.chat_sessions = {}
@@ -753,12 +774,13 @@ with st.sidebar:
     
     st.success(f"Knowledge Base loaded with {folder_index.ntotal} chunks", icon="✅")
     
-    uploaded_pdfs = st.file_uploader("Upload PDFs to use as context", type=["pdf"], accept_multiple_files=True)
-    if uploaded_pdfs:
-        st.session_state.uploaded_pdfs_data = uploaded_pdfs
-        st.info(f"{len(uploaded_pdfs)} PDF(s) loaded. They will be used as context.")
-    elif st.session_state.uploaded_pdfs_data:
-        st.session_state.uploaded_pdfs_data = None
+    if PYPDF2_AVAILABLE:
+        uploaded_pdfs = st.file_uploader("Upload PDFs to use as context", type=["pdf"], accept_multiple_files=True)
+        if uploaded_pdfs:
+            st.session_state.uploaded_pdfs_data = uploaded_pdfs
+            st.info(f"{len(uploaded_pdfs)} PDF(s) loaded. They will be used as context.")
+        elif st.session_state.uploaded_pdfs_data:
+            st.session_state.uploaded_pdfs_data = None
         
     st.markdown("---")
 
@@ -802,10 +824,6 @@ with chat_container:
         with st.chat_message(message["role"]):
             content = message["content"]
             
-            split_point = "Writ Petition under Article 226 of the Constitution of India"
-            if content.count(split_point) > 1:
-                content = content.split(split_point, 1)[0] + split_point + content.split(split_point, 2)[-1]
-            
             if message["role"] == "assistant":
                 js_safe_content = content.replace("'", "\\'").replace('\n', ' ')
                 st.markdown(
@@ -832,13 +850,127 @@ with chat_container:
         st.caption(f"Total tokens used in this session: **{st.session_state.tokens_used}**")
 
 # ==================================
-# NEW PROMPT WORKFLOW FUNCTIONS
+# OPTIMIZED PROMPT WORKFLOW
 # ==================================
 
-def generate_prompt_variations(prompt):
-    """
-    Called by chat_input. Generates prompts and stores them in 'pending_prompts'.
-    """
+def handle_selected_prompt(selected_prompt):
+    """Optimized version with better state management"""
+    st.session_state.pending_prompts = []
+    st.session_state.processing = True
+
+    # RAG from Database
+    all_sources = []
+    try:
+        chunks, sources = retrieve_and_rerank(selected_prompt, folder_index, folder_metadata, embed_model, reranker_model, top_k=3)
+        all_sources.extend(sources)
+    except Exception as e:
+        st.warning(f"Database retrieval error: {e}")
+
+    unique_sources = {}
+    for source in all_sources:
+        key = source['source'] + source['text'][:100]
+        if key not in unique_sources:
+            unique_sources[key] = source
+    final_rag_context = "\n\n".join([truncate_text(s['text'], max_words=200) for s in unique_sources.values()])
+    
+    # RAG from Uploaded PDFs
+    uploaded_context_summary = ""
+    if st.session_state.uploaded_pdfs_data and PYPDF2_AVAILABLE:
+        full_pdf_text = extract_text_from_pdfs(st.session_state.uploaded_pdfs_data)
+        if full_pdf_text:
+            pdf_chunks = full_pdf_text.split('\n\n')
+            pdf_metadata = [{'text': chunk, 'source': 'Uploaded Document'} for chunk in pdf_chunks if chunk.strip()]
+            if pdf_metadata:
+                pdf_search_results = bm25_search(selected_prompt, pdf_metadata, top_k=5)
+                uploaded_context_summary = "\n\n".join([res['text'] for res in pdf_search_results])
+
+    # Construct Final Prompt
+    final_prompt = construct_final_prompt(selected_prompt, final_rag_context, uploaded_context_summary)
+    
+    # LLM Call for Answer
+    llm_answer, tokens_used = call_openrouter(st.session_state.selected_model, final_prompt, list(unique_sources.values()))
+    st.session_state.tokens_used += tokens_used
+
+    # LLM Call for Follow-up Suggestions (async-style, non-blocking)
+    try:
+        suggested_prompts = generate_suggested_prompts(selected_prompt, llm_answer)
+        st.session_state.suggested_prompts = suggested_prompts
+    except Exception as e:
+        st.session_state.suggested_prompts = []
+
+    # Add assistant message to state
+    assistant_message = {
+        "role": "assistant",
+        "content": llm_answer,
+        "sources": list(unique_sources.values())
+    }
+    st.session_state.messages.append(assistant_message)
+    
+    if st.session_state.active_chat:
+        st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
+    
+    st.session_state.processing = False
+
+
+# ==================================
+# IMPROVED PROMPT SELECTION UI
+# ==================================
+
+if st.session_state.processing:
+    st.markdown('<div class="processing-indicator">⚖️ Processing your legal research query...</div>', unsafe_allow_html=True)
+    st.markdown("Please wait while we analyze relevant case law and statutes.")
+
+elif st.session_state.pending_prompts:
+    st.markdown("### 📋 Select Your Preferred Query Format")
+    st.markdown("Choose how you'd like to frame your legal research question:")
+    
+    labels = ["🎯 Original Question", "📚 Detailed Analysis", "⚖️ Case Law & Precedents"]
+    
+    col1, col2, col3 = st.columns(3)
+    columns = [col1, col2, col3]
+    
+    for i, (prompt_text, label, col) in enumerate(zip(st.session_state.pending_prompts, labels, columns)):
+        with col:
+            card_class = "original" if i == 0 else "refined"
+            st.markdown(f"""
+            <div class="prompt-card {card_class}">
+                <div class="prompt-label">{label}</div>
+                <div class="prompt-text">{prompt_text}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if st.button("Select This Query", key=f"pending_{i}", use_container_width=True, type="primary" if i == 0 else "secondary"):
+                handle_selected_prompt(prompt_text)
+                st.rerun()
+
+elif st.session_state.suggested_prompts:
+    st.markdown("### 💡 Suggested Follow-up Questions")
+    
+    for i, prompt_text in enumerate(st.session_state.suggested_prompts):
+        if st.button(f"🔍 {prompt_text}", key=f"suggestion_{i}", use_container_width=True):
+            # Clear suggestions and generate new variations
+            st.session_state.suggested_prompts = []
+            
+            if not st.session_state.active_chat:
+                chat_id = f"chat_{len(st.session_state.chat_sessions) + 1}_{random.randint(1000,9999)}"
+                new_chat_name = prompt_text[:30].strip() + "..." if len(prompt_text) > 30 else prompt_text.strip()
+                st.session_state.chat_sessions[chat_id] = {"name": new_chat_name, "messages": [], "created_at": datetime.now()}
+                st.session_state.active_chat = chat_id
+                st.session_state.messages = st.session_state.chat_sessions[chat_id]["messages"]
+            
+            st.session_state.messages.append({"role": "user", "content": prompt_text})
+            variations = dynamic_query_generator(prompt_text)
+            st.session_state.pending_prompts = variations
+            
+            if st.session_state.active_chat:
+                st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
+            
+            st.rerun()
+
+# --- Streamlit Chat Input ---
+chat_input_disabled = bool(st.session_state.pending_prompts) or st.session_state.processing
+
+if prompt := st.chat_input("Ask a legal question (e.g., 'What is the doctrine of Res Gestae?')", disabled=chat_input_disabled):
     st.session_state.suggested_prompts = []
     
     if not st.session_state.active_chat:
@@ -850,110 +982,10 @@ def generate_prompt_variations(prompt):
     
     st.session_state.messages.append({"role": "user", "content": prompt})
     
-    with st.spinner("Generating query variations..."):
-        variations = dynamic_query_generator(prompt)
-        st.session_state.pending_prompts = variations
-        
+    variations = dynamic_query_generator(prompt)
+    st.session_state.pending_prompts = variations
+    
     if st.session_state.active_chat:
         st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
-
-
-def handle_selected_prompt(selected_prompt):
-    """
-    Called by button click. Clears pending prompts and runs the full RAG pipeline.
-    """
-    st.session_state.pending_prompts = []
-
-    with st.spinner("⚖️ Conducting research..."):
-        
-        # RAG from Database
-        all_sources = []
-        try:
-            chunks, sources = retrieve_and_rerank(selected_prompt, folder_index, folder_metadata, embed_model, reranker_model, top_k=3)
-            all_sources.extend(sources)
-        except Exception as e:
-            st.warning(f"Database retrieval error: {e}")
-
-        unique_sources = {}
-        for source in all_sources:
-            key = source['source'] + source['text'][:100]
-            if key not in unique_sources:
-                unique_sources[key] = source
-        final_rag_context = "\n\n".join([truncate_text(s['text'], max_words=200) for s in unique_sources.values()])
-        
-        # RAG from Uploaded PDFs
-        uploaded_context_summary = ""
-        if st.session_state.uploaded_pdfs_data:
-            full_pdf_text = extract_text_from_pdfs(st.session_state.uploaded_pdfs_data)
-            if full_pdf_text:
-                pdf_chunks = full_pdf_text.split('\n\n')
-                pdf_metadata = [{'text': chunk, 'source': 'Uploaded Document'} for chunk in pdf_chunks if chunk.strip()]
-                if pdf_metadata:
-                    pdf_search_results = bm25_search(selected_prompt, pdf_metadata, top_k=5)
-                    uploaded_context_summary = "\n\n".join([res['text'] for res in pdf_search_results])
-
-        # Construct Final Prompt
-        final_prompt = construct_final_prompt(selected_prompt, final_rag_context, uploaded_context_summary)
-        
-        # LLM Call for Answer
-        llm_answer, tokens_used = call_openrouter(st.session_state.selected_model, final_prompt, list(unique_sources.values()))
-        st.session_state.tokens_used += tokens_used
-
-        # LLM Call for Follow-up Suggestions
-        try:
-            suggested_prompts = generate_suggested_prompts(selected_prompt, llm_answer)
-            st.session_state.suggested_prompts = suggested_prompts
-        except Exception as e:
-            st.warning(f"Could not generate suggestions: {e}")
-
-        # Add assistant message to state
-        assistant_message = {
-            "role": "assistant",
-            "content": llm_answer,
-            "sources": list(unique_sources.values())
-        }
-        st.session_state.messages.append(assistant_message)
-        
-        if st.session_state.active_chat:
-            st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
     
-    # CRITICAL FIX: Added st.rerun()
     st.rerun()
-
-# ==================================
-# MAIN CHAT INPUT & SUGGESTION UI
-# ==================================
-
-# --- NEW: Conditional UI for prompts ---
-if st.session_state.pending_prompts:
-    st.caption("Select a prompt to continue:")
-    
-    labels = ["Original Question", "Refined Prompt", "Refined Prompt"]
-    
-    for i, prompt_text in enumerate(st.session_state.pending_prompts):
-        button_label = f"**{labels[i]}**\n\n{prompt_text}"
-        st.button(
-            button_label, 
-            key=f"pending_{i}",
-            on_click=handle_selected_prompt,
-            args=(prompt_text,),
-            use_container_width=True,
-            type="primary"
-        )
-elif st.session_state.suggested_prompts:
-    st.caption("Suggested Follow-ups:")
-    
-    for i, prompt_text in enumerate(st.session_state.suggested_prompts):
-        st.button(
-            prompt_text, 
-            key=f"suggestion_{i}",
-            on_click=generate_prompt_variations,
-            args=(prompt_text,),
-            use_container_width=True
-        )
-
-# --- Streamlit Chat Input (calls generate_prompt_variations) ---
-chat_input_disabled = bool(st.session_state.pending_prompts)
-if prompt := st.chat_input("Ask a legal question (e.g., 'What is the doctrine of Res Gestae?')", disabled=chat_input_disabled):
-    generate_prompt_variations(prompt)
-
