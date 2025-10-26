@@ -188,34 +188,62 @@ def reciprocal_rank_fusion(results_list, k=60):
     return fused_results
 
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
-    """Fixed version with proper FAISS handling"""
+    """Fixed version with proper FAISS handling and metadata validation"""
     try:
+        # Validate metadata first
+        if not metadata or not isinstance(metadata, list):
+            st.warning("Knowledge base metadata is empty or invalid.")
+            return "", []
+        
         query_emb = embed_model.encode([query], convert_to_numpy=True)
         
         # Safe search with proper error handling
-        search_k = min(top_k * 4, index.ntotal)
+        metadata_size = len(metadata)
+        search_k = min(top_k * 4, index.ntotal, metadata_size)
+        
+        if search_k == 0:
+            return "", []
+        
         distances, indices = index.search(query_emb, search_k)
         
-        # Filter valid indices
+        # Filter valid indices with strict bounds checking
         semantic_results = []
         for idx in indices[0]:
-            if 0 <= idx < len(metadata):
-                semantic_results.append(metadata[idx])
+            idx = int(idx)  # Ensure it's a Python int
+            if idx >= 0 and idx < metadata_size:
+                try:
+                    semantic_results.append(metadata[idx])
+                except (IndexError, KeyError):
+                    continue
         
+        # BM25 search as fallback
         bm25_results = bm25_search(query, metadata, top_k=search_k)
+        
+        # Fusion
         fused_candidates = reciprocal_rank_fusion([semantic_results, bm25_results])
         
-        pairs = [[query, c["text"]] for c in fused_candidates]
+        if not fused_candidates:
+            # Fallback to just BM25 if fusion fails
+            fused_candidates = bm25_results[:top_k]
+        
+        pairs = [[query, c["text"]] for c in fused_candidates if "text" in c]
         if not pairs:
             return "", []
         
         scores = reranker_model.predict(pairs)
         reranked = sorted(zip(fused_candidates, scores), key=lambda x: x[1], reverse=True)[:top_k]
         top_chunks = [truncate_text(item[0]["text"], max_words=200) for item in reranked]
-        sources = [{"text": item[0]["text"], "source": item[0]["source"]} for item in reranked]
+        sources = [{"text": item[0]["text"], "source": item[0].get("source", "Unknown")} for item in reranked]
         return "\n\n".join(top_chunks), sources
     except Exception as e:
-        st.error(f"Retrieval error: {str(e)}")
+        # Silent fallback - just use BM25
+        try:
+            bm25_results = bm25_search(query, metadata, top_k=top_k)
+            if bm25_results:
+                top_chunks = [truncate_text(r["text"], max_words=200) for r in bm25_results]
+                return "\n\n".join(top_chunks), bm25_results
+        except:
+            pass
         return "", []
 
 def dynamic_query_generator(question):
@@ -541,93 +569,243 @@ if "processing" not in st.session_state: st.session_state.processing = False
 custom_css = f"""
 <style>
 /* Base UI Cleanup */
-.main {{ padding-top: 20px; }}
+.main {{ 
+    padding-top: 20px; 
+    background: linear-gradient(to bottom, #f8f9fa 0%, #ffffff 100%);
+}}
+
+/* Hide Streamlit branding for cleaner look */
+#MainMenu {{visibility: hidden;}}
+footer {{visibility: hidden;}}
 
 /* Professional Prompt Card Styling */
-.prompt-card {{
-    background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
-    border: 2px solid #e0e0e0;
-    border-radius: 12px;
-    padding: 20px;
-    margin: 10px 0;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
-    transition: all 0.3s ease;
-    cursor: pointer;
+.prompt-selection-container {{
+    background: white;
+    border-radius: 16px;
+    padding: 30px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+    margin: 20px 0;
 }}
+
+.prompt-card {{
+    background: linear-gradient(145deg, #ffffff 0%, #f8f9fa 100%);
+    border: 2px solid #e8eaed;
+    border-radius: 16px;
+    padding: 24px;
+    margin: 15px 0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+}}
+
+.prompt-card::before {{
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 4px;
+    background: linear-gradient(90deg, #1e3c72 0%, #2a5298 100%);
+    transform: scaleX(0);
+    transition: transform 0.35s ease;
+}}
+
 .prompt-card:hover {{
     border-color: #1e3c72;
-    box-shadow: 0 6px 12px rgba(30, 60, 114, 0.15);
-    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(30, 60, 114, 0.12);
+    transform: translateY(-4px);
 }}
+
+.prompt-card:hover::before {{
+    transform: scaleX(1);
+}}
+
 .prompt-card.original {{
     border-left: 5px solid #d4af37;
-    background: linear-gradient(135deg, #fffef7 0%, #faf8f0 100%);
+    background: linear-gradient(145deg, #fffef7 0%, #faf8f0 100%);
 }}
+
+.prompt-card.original::before {{
+    background: linear-gradient(90deg, #d4af37 0%, #f4d03f 100%);
+}}
+
 .prompt-card.refined {{
     border-left: 5px solid #1e3c72;
 }}
+
 .prompt-label {{
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 1px;
-    color: #666;
-    margin-bottom: 8px;
+    letter-spacing: 1.5px;
+    color: #5f6368;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }}
+
+.prompt-label .icon {{
+    font-size: 16px;
+}}
+
 .prompt-text {{
     font-size: 15px;
-    color: #1a1a1a;
-    line-height: 1.6;
+    color: #202124;
+    line-height: 1.7;
     font-weight: 500;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}}
+
+/* Section Headers */
+.section-header {{
+    font-size: 20px;
+    font-weight: 700;
+    color: #1e3c72;
+    margin: 30px 0 20px 0;
+    padding-bottom: 10px;
+    border-bottom: 3px solid #d4af37;
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }}
 
 /* Sidebar Chat Button Styling */
 .stButton>button {{
-    border-radius: 8px;
-    transition: all 0.2s ease-in-out;
+    border-radius: 10px;
+    transition: all 0.25s ease;
     margin-top: 5px;
-    height: 40px;
-    border: 1px solid #ccc;
+    height: 42px;
+    border: 1.5px solid #e0e0e0;
+    font-weight: 500;
 }}
+
 .stButton>button:hover {{ 
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); 
-    border: 1px solid #1e3c72;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12); 
+    border: 1.5px solid #1e3c72;
+    transform: translateX(2px);
 }}
 
 /* Primary button for Active Chat Session */
 .stButton[data-testid*="primary"]>button {{
-    background-color: #1e3c72;
+    background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
     color: white;
-    border: 1px solid #1e3c72;
+    border: 1.5px solid #1e3c72;
+    box-shadow: 0 4px 8px rgba(30, 60, 114, 0.2);
 }}
 
 /* Chat Message Bubbles */
-div[data-testid="chat-message-container"] {{
-    padding: 10px;
-    border-radius: 10px;
-    margin-bottom: 10px;
+div[data-testid="stChatMessage"] {{
+    padding: 16px;
+    border-radius: 12px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}}
+
+/* User Message */
+div[data-testid="stChatMessage"][data-testid*="user"] {{
+    background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+    border-left: 4px solid #1e3c72;
+}}
+
+/* Assistant Message */
+div[data-testid="stChatMessage"][data-testid*="assistant"] {{
+    background: linear-gradient(135deg, #f5f5f5 0%, #eeeeee 100%);
+    border-right: 4px solid #d4af37;
 }}
 
 /* TTS Button Styling */
 .stButton button[kind="secondary"] {{
-    background-color: #f9f9f9;
+    background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
     color: #1e3c72;
-    border: 1px solid #ccc;
-    font-size: 10px;
-    padding: 2px 5px;
-    height: 25px;
+    border: 1.5px solid #e0e0e0;
+    font-size: 11px;
+    padding: 4px 8px;
+    height: 28px;
     margin-bottom: 10px;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+}}
+
+.stButton button[kind="secondary"]:hover {{
+    background: #1e3c72;
+    color: white;
+    border-color: #1e3c72;
+}}
+
+/* Suggestion Button Styling */
+.suggestion-btn {{
+    background: white;
+    border: 2px solid #e0e0e0;
+    border-radius: 12px;
+    padding: 16px;
+    margin: 10px 0;
+    transition: all 0.3s ease;
+    text-align: left;
+    font-size: 14px;
+    color: #202124;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+}}
+
+.suggestion-btn:hover {{
+    background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+    border-color: #1e3c72;
+    box-shadow: 0 4px 12px rgba(30, 60, 114, 0.15);
+    transform: translateX(4px);
 }}
 
 /* Loading Animation */
 @keyframes pulse {{
-    0%, 100% {{ opacity: 1; }}
-    50% {{ opacity: 0.5; }}
+    0%, 100% {{ opacity: 1; transform: scale(1); }}
+    50% {{ opacity: 0.7; transform: scale(0.98); }}
 }}
+
 .processing-indicator {{
-    animation: pulse 1.5s ease-in-out infinite;
-    color: #1e3c72;
+    animation: pulse 2s ease-in-out infinite;
+    background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+    color: white;
+    padding: 20px;
+    border-radius: 12px;
+    text-align: center;
     font-weight: 600;
+    font-size: 16px;
+    box-shadow: 0 4px 16px rgba(30, 60, 114, 0.3);
+    margin: 20px 0;
+}}
+
+.processing-subtext {{
+    font-size: 13px;
+    color: #e3f2fd;
+    margin-top: 8px;
+    font-weight: 400;
+}}
+
+/* Input Field Styling */
+.stChatInput {{
+    border-radius: 12px;
+    border: 2px solid #e0e0e0;
+    transition: all 0.3s ease;
+}}
+
+.stChatInput:focus-within {{
+    border-color: #1e3c72;
+    box-shadow: 0 0 0 3px rgba(30, 60, 114, 0.1);
+}}
+
+/* Expander Styling */
+.streamlit-expanderHeader {{
+    background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+    border-radius: 8px;
+    font-weight: 600;
+    color: #1e3c72;
+}}
+
+/* Column Cards in Prompt Selection */
+.stColumn {{
+    padding: 8px;
 }}
 </style>
 """
@@ -917,55 +1095,72 @@ def handle_selected_prompt(selected_prompt):
 # ==================================
 
 if st.session_state.processing:
-    st.markdown('<div class="processing-indicator">⚖️ Processing your legal research query...</div>', unsafe_allow_html=True)
-    st.markdown("Please wait while we analyze relevant case law and statutes.")
+    st.markdown("""
+    <div class="processing-indicator">
+        ⚖️ Analyzing Your Legal Research Query
+        <div class="processing-subtext">Reviewing case law, statutes, and relevant precedents...</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 elif st.session_state.pending_prompts:
-    st.markdown("### 📋 Select Your Preferred Query Format")
-    st.markdown("Choose how you'd like to frame your legal research question:")
+    st.markdown('<div class="section-header">📋 Select Your Research Query Format</div>', unsafe_allow_html=True)
+    st.markdown("Choose the most appropriate framing for your legal research question:")
     
-    labels = ["🎯 Original Question", "📚 Detailed Analysis", "⚖️ Case Law & Precedents"]
+    st.markdown('<div class="prompt-selection-container">', unsafe_allow_html=True)
+    
+    labels = [
+        ("🎯", "Original Question", "Your initial query as stated"),
+        ("📚", "Detailed Analysis", "Comprehensive legal framework exploration"),
+        ("⚖️", "Case Law & Precedents", "Judicial interpretation and statutory references")
+    ]
     
     col1, col2, col3 = st.columns(3)
     columns = [col1, col2, col3]
     
-    for i, (prompt_text, label, col) in enumerate(zip(st.session_state.pending_prompts, labels, columns)):
+    for i, (prompt_text, (icon, label, desc), col) in enumerate(zip(st.session_state.pending_prompts, labels, columns)):
         with col:
             card_class = "original" if i == 0 else "refined"
             st.markdown(f"""
             <div class="prompt-card {card_class}">
-                <div class="prompt-label">{label}</div>
+                <div class="prompt-label">
+                    <span class="icon">{icon}</span>
+                    <span>{label}</span>
+                </div>
                 <div class="prompt-text">{prompt_text}</div>
             </div>
             """, unsafe_allow_html=True)
             
-            if st.button("Select This Query", key=f"pending_{i}", use_container_width=True, type="primary" if i == 0 else "secondary"):
+            if st.button(f"Select Query {i+1}", key=f"pending_{i}", use_container_width=True, type="primary" if i == 0 else "secondary"):
                 handle_selected_prompt(prompt_text)
                 st.rerun()
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
 elif st.session_state.suggested_prompts:
-    st.markdown("### 💡 Suggested Follow-up Questions")
+    st.markdown('<div class="section-header">💡 Suggested Follow-up Questions</div>', unsafe_allow_html=True)
     
     for i, prompt_text in enumerate(st.session_state.suggested_prompts):
-        if st.button(f"🔍 {prompt_text}", key=f"suggestion_{i}", use_container_width=True):
-            # Clear suggestions and generate new variations
-            st.session_state.suggested_prompts = []
-            
-            if not st.session_state.active_chat:
-                chat_id = f"chat_{len(st.session_state.chat_sessions) + 1}_{random.randint(1000,9999)}"
-                new_chat_name = prompt_text[:30].strip() + "..." if len(prompt_text) > 30 else prompt_text.strip()
-                st.session_state.chat_sessions[chat_id] = {"name": new_chat_name, "messages": [], "created_at": datetime.now()}
-                st.session_state.active_chat = chat_id
-                st.session_state.messages = st.session_state.chat_sessions[chat_id]["messages"]
-            
-            st.session_state.messages.append({"role": "user", "content": prompt_text})
-            variations = dynamic_query_generator(prompt_text)
-            st.session_state.pending_prompts = variations
-            
-            if st.session_state.active_chat:
-                st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
-            
-            st.rerun()
+        col1, col2 = st.columns([0.95, 0.05])
+        with col1:
+            if st.button(f"🔍 {prompt_text}", key=f"suggestion_{i}", use_container_width=True):
+                # Clear suggestions and generate new variations
+                st.session_state.suggested_prompts = []
+                
+                if not st.session_state.active_chat:
+                    chat_id = f"chat_{len(st.session_state.chat_sessions) + 1}_{random.randint(1000,9999)}"
+                    new_chat_name = prompt_text[:30].strip() + "..." if len(prompt_text) > 30 else prompt_text.strip()
+                    st.session_state.chat_sessions[chat_id] = {"name": new_chat_name, "messages": [], "created_at": datetime.now()}
+                    st.session_state.active_chat = chat_id
+                    st.session_state.messages = st.session_state.chat_sessions[chat_id]["messages"]
+                
+                st.session_state.messages.append({"role": "user", "content": prompt_text})
+                variations = dynamic_query_generator(prompt_text)
+                st.session_state.pending_prompts = variations
+                
+                if st.session_state.active_chat:
+                    st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
+                
+                st.rerun()
 
 # --- Streamlit Chat Input ---
 chat_input_disabled = bool(st.session_state.pending_prompts) or st.session_state.processing
