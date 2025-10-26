@@ -10,6 +10,4 @@ nltk
 reportlab
 torch
 PyPDF2
-python-docx
-
-
+python-docx==0.8.11
