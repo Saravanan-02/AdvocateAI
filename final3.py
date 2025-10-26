@@ -190,18 +190,30 @@ def reciprocal_rank_fusion(results_list, k=60):
 def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top_k=2):
     """Fixed version with proper FAISS handling and metadata validation"""
     try:
-        # Validate metadata first
-        if not metadata or not isinstance(metadata, list):
-            st.warning("Knowledge base metadata is empty or invalid.")
+        # Validate metadata first - SILENTLY
+        if not metadata or not isinstance(metadata, list) or len(metadata) == 0:
+            # Try BM25 fallback without error message
+            try:
+                bm25_results = bm25_search(query, metadata if metadata else [], top_k=top_k)
+                if bm25_results:
+                    top_chunks = [truncate_text(r["text"], max_words=200) for r in bm25_results]
+                    return "\n\n".join(top_chunks), bm25_results
+            except:
+                pass
             return "", []
         
         query_emb = embed_model.encode([query], convert_to_numpy=True)
         
         # Safe search with proper error handling
         metadata_size = len(metadata)
-        search_k = min(top_k * 4, index.ntotal, metadata_size)
+        search_k = min(top_k * 4, index.ntotal if index else 0, metadata_size)
         
-        if search_k == 0:
+        if search_k == 0 or not index:
+            # Fallback to BM25 only
+            bm25_results = bm25_search(query, metadata, top_k=top_k)
+            if bm25_results:
+                top_chunks = [truncate_text(r["text"], max_words=200) for r in bm25_results]
+                return "\n\n".join(top_chunks), bm25_results
             return "", []
         
         distances, indices = index.search(query_emb, search_k)
@@ -224,7 +236,10 @@ def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top
         
         if not fused_candidates:
             # Fallback to just BM25 if fusion fails
-            fused_candidates = bm25_results[:top_k]
+            fused_candidates = bm25_results[:top_k] if bm25_results else []
+        
+        if not fused_candidates:
+            return "", []
         
         pairs = [[query, c["text"]] for c in fused_candidates if "text" in c]
         if not pairs:
@@ -238,7 +253,7 @@ def retrieve_and_rerank(query, index, metadata, embed_model, reranker_model, top
     except Exception as e:
         # Silent fallback - just use BM25
         try:
-            bm25_results = bm25_search(query, metadata, top_k=top_k)
+            bm25_results = bm25_search(query, metadata if metadata else [], top_k=top_k)
             if bm25_results:
                 top_chunks = [truncate_text(r["text"], max_words=200) for r in bm25_results]
                 return "\n\n".join(top_chunks), bm25_results
@@ -735,19 +750,29 @@ div[data-testid="stChatMessage"][data-testid*="assistant"] {{
     border-color: #1e3c72;
 }}
 
-/* Suggestion Button Styling */
+/* Suggestion Button Styling - FIXED */
+.suggestion-container {{
+    margin: 12px 0;
+}}
+
 .suggestion-btn {{
     background: white;
     border: 2px solid #e0e0e0;
     border-radius: 12px;
-    padding: 16px;
-    margin: 10px 0;
+    padding: 18px 20px;
     transition: all 0.3s ease;
     text-align: left;
     font-size: 14px;
+    line-height: 1.6;
     color: #202124;
     cursor: pointer;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+    display: block;
+    width: 100%;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    white-space: normal;
+    min-height: 60px;
 }}
 
 .suggestion-btn:hover {{
@@ -755,6 +780,36 @@ div[data-testid="stChatMessage"][data-testid*="assistant"] {{
     border-color: #1e3c72;
     box-shadow: 0 4px 12px rgba(30, 60, 114, 0.15);
     transform: translateX(4px);
+}}
+
+/* Fix Streamlit button container for suggestions */
+div[data-testid="column"] > div > div > div > button {{
+    white-space: normal !important;
+    height: auto !important;
+    min-height: 60px !important;
+    text-align: left !important;
+    padding: 18px 20px !important;
+    line-height: 1.6 !important;
+    word-wrap: break-word !important;
+}}
+
+/* Ensure all buttons in main content area wrap properly */
+.stButton > button {{
+    white-space: normal !important;
+    height: auto !important;
+    padding: 12px 20px !important;
+    line-height: 1.5 !important;
+    word-break: break-word !important;
+    text-align: left !important;
+}}
+
+/* Sidebar buttons keep their compact style */
+[data-testid="stSidebar"] .stButton > button {{
+    white-space: nowrap !important;
+    height: 42px !important;
+    text-align: center !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
 }}
 
 /* Loading Animation */
@@ -1138,11 +1193,23 @@ elif st.session_state.pending_prompts:
 
 elif st.session_state.suggested_prompts:
     st.markdown('<div class="section-header">💡 Suggested Follow-up Questions</div>', unsafe_allow_html=True)
+    st.markdown("Click on any question below to continue your research:")
     
     for i, prompt_text in enumerate(st.session_state.suggested_prompts):
-        col1, col2 = st.columns([0.95, 0.05])
-        with col1:
-            if st.button(f"🔍 {prompt_text}", key=f"suggestion_{i}", use_container_width=True):
+        # Create a container for better formatting
+        suggestion_container = st.container()
+        with suggestion_container:
+            # Use custom HTML styling for the button wrapper
+            st.markdown(f'<div class="suggestion-container">', unsafe_allow_html=True)
+            
+            # Streamlit button with better configuration
+            button_label = f"🔍 {prompt_text}"
+            if st.button(
+                button_label, 
+                key=f"suggestion_{i}", 
+                use_container_width=True,
+                help="Click to explore this question"
+            ):
                 # Clear suggestions and generate new variations
                 st.session_state.suggested_prompts = []
                 
@@ -1161,6 +1228,8 @@ elif st.session_state.suggested_prompts:
                     st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
                 
                 st.rerun()
+            
+            st.markdown('</div>', unsafe_allow_html=True)
 
 # --- Streamlit Chat Input ---
 chat_input_disabled = bool(st.session_state.pending_prompts) or st.session_state.processing
