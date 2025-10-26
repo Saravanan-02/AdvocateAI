@@ -424,15 +424,24 @@ def highlight_with_style(text, search_terms_raw):
 def check_keywords_in_chat(messages, keyword_terms):
     """
     Loops through chat history to check if keywords exist.
+    Returns True if ANY keyword is found in ANY message.
     """
-    if not keyword_terms:
+    if not keyword_terms or not keyword_terms.strip():
+        return True  # No keywords to search for
+    
+    # Split keywords and clean them
+    keywords = [term.strip().lower() for term in keyword_terms.split(',') if term.strip()]
+    
+    if not keywords:
         return True
     
+    # Search through all messages
     for message in messages:
-        content = message["content"]
-        for term in keyword_terms.split(','):
-            if term.strip() and term.strip().lower() in content.lower():
+        content = message.get("content", "").lower()
+        for keyword in keywords:
+            if keyword in content:
                 return True
+    
     return False
 
 
@@ -868,11 +877,14 @@ st.markdown(custom_css, unsafe_allow_html=True)
 
 
 # --- KEYWORD BUG FIX: Run check *before* sidebar is rendered ---
-if "keyword_highlight_input" in st.session_state:
+keyword_input = st.session_state.get("keyword_highlight_input", "")
+if keyword_input and st.session_state.messages:
     st.session_state.keyword_found = check_keywords_in_chat(
         st.session_state.messages, 
-        st.session_state.keyword_highlight_input
+        keyword_input
     )
+else:
+    st.session_state.keyword_found = True
 
 
 # ==========================
@@ -883,13 +895,15 @@ with st.sidebar:
     st.header("🔑 Keyword Highlight")
     keyword_search_input = st.text_input("Enter keywords (comma-separated)", key="keyword_highlight_input", placeholder="e.g., defense, doctrine, contract")
     
-    st.markdown("---") 
-
-    if not st.session_state.keyword_found and st.session_state.keyword_highlight_input:
-        st.warning("⚠️ Keywords not found.", icon="🔍")
-    elif st.session_state.keyword_highlight_input and st.session_state.messages:
-        st.success("Keywords found.", icon="✨")
-
+    # Show keyword status only if there are messages and keywords entered
+    if keyword_search_input and st.session_state.messages:
+        if st.session_state.keyword_found:
+            st.success("✅ Keywords found in chat", icon="✨")
+        else:
+            st.warning("⚠️ Keywords not found in current chat", icon="🔍")
+    elif keyword_search_input and not st.session_state.messages:
+        st.info("💬 Start a conversation to search for keywords", icon="ℹ️")
+    
     st.markdown("---") 
 
     st.header("💬 Chat History")
@@ -1049,7 +1063,7 @@ if st.session_state.active_chat and st.session_state.active_chat in st.session_s
     current_chat_name = st.session_state.chat_sessions[st.session_state.active_chat]["name"]
     st.subheader(f"💬 {current_chat_name}")
 
-keyword_terms = st.session_state.keyword_highlight_input
+keyword_terms = st.session_state.get("keyword_highlight_input", "")
 
 chat_container = st.container()
 with chat_container:
@@ -1064,8 +1078,8 @@ with chat_container:
                     unsafe_allow_html=True
                 )
 
-            # --- RENDER HIGHLIGHTS ---
-            if keyword_terms:
+            # --- RENDER HIGHLIGHTS (Updated to work with keyword changes) ---
+            if keyword_terms and keyword_terms.strip():
                 highlighted_content, _ = highlight_with_style(content, keyword_terms)
                 st.markdown(highlighted_content, unsafe_allow_html=True)
             else:
@@ -1087,7 +1101,7 @@ with chat_container:
 # ==================================
 
 def handle_selected_prompt(selected_prompt):
-    """Optimized version with better state management"""
+    """Optimized version with better state management and auto-naming"""
     st.session_state.pending_prompts = []
     st.session_state.processing = True
 
@@ -1097,7 +1111,7 @@ def handle_selected_prompt(selected_prompt):
         chunks, sources = retrieve_and_rerank(selected_prompt, folder_index, folder_metadata, embed_model, reranker_model, top_k=3)
         all_sources.extend(sources)
     except Exception as e:
-        st.warning(f"Database retrieval error: {e}")
+        pass  # Silent error handling
 
     unique_sources = {}
     for source in all_sources:
@@ -1139,7 +1153,24 @@ def handle_selected_prompt(selected_prompt):
     }
     st.session_state.messages.append(assistant_message)
     
+    # AUTO-NAME THE CHAT if it's still "New Chat"
     if st.session_state.active_chat:
+        current_chat = st.session_state.chat_sessions[st.session_state.active_chat]
+        if current_chat["name"] == "New Chat":
+            # Get the first user message (the original question)
+            first_user_msg = None
+            for msg in st.session_state.messages:
+                if msg["role"] == "user":
+                    first_user_msg = msg["content"]
+                    break
+            
+            if first_user_msg:
+                new_chat_name = first_user_msg[:40].strip()
+                if len(first_user_msg) > 40:
+                    new_chat_name += "..."
+                st.session_state.chat_sessions[st.session_state.active_chat]["name"] = new_chat_name
+        
+        # Save messages to chat session
         st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
     
     st.session_state.processing = False
