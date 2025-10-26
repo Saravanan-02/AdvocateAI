@@ -748,7 +748,7 @@ with st.sidebar:
     st.session_state.selected_model = st.selectbox("Select Model", [
         "openai/gpt-5", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro",
         "x-ai/grok-code-fast-1", "google/gemini-2.5-flash", 
-        "google/gemini-2.5-flash-lite", "openai/gpt-5-mini"
+        "google/gemini-2.5-flash-lite", "openai/gpt-5-mini", "tngtech/deepseek-r1t2-chimera:free"
     ], index=0)
     
     st.success(f"Knowledge Base loaded with {folder_index.ntotal} chunks", icon="✅")
@@ -956,3 +956,4 @@ elif st.session_state.suggested_prompts:
 chat_input_disabled = bool(st.session_state.pending_prompts)
 if prompt := st.chat_input("Ask a legal question (e.g., 'What is the doctrine of Res Gestae?')", disabled=chat_input_disabled):
     generate_prompt_variations(prompt)
+
