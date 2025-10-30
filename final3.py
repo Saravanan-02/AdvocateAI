@@ -1141,7 +1141,7 @@ with st.sidebar:
     st.session_state.selected_model = st.selectbox("Select Model", [
         "openai/gpt-5", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro",
         "x-ai/grok-code-fast-1", "google/gemini-2.5-flash", 
-        "deepseek/deepseek-r1-distill-llama-70b:free", "openai/gpt-5-mini", "tngtech/deepseek-r1t2-chimera:free"
+        "deepseek/deepseek-r1-distill-llama-70b:free", "openai/gpt-5-mini"
     ], index=0)
     
     st.success(f"Knowledge Base loaded with {folder_index.ntotal} chunks", icon="✅")
@@ -1419,3 +1419,4 @@ if prompt := st.chat_input("Ask a legal question (e.g., 'What is the doctrine of
         st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
     
     st.rerun()
+
