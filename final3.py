@@ -14,7 +14,6 @@ from nltk.corpus import stopwords
 import string
 import base64
 import json
-import time  # Added for retry delays
 from datetime import datetime
 from io import BytesIO
 
@@ -347,139 +346,53 @@ def construct_final_prompt(question, rag_summary, uploaded_context_summary):
 # ==========================
 # LLM API CALL (STREAMING)
 # ==========================
-def call_openrouter(model, prompt, sources=None, max_retries=3):
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}", 
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://advocate-ai.streamlit.app",  # Optional: helps with rate limiting
-        "X-Title": "Advocate AI Legal Assistant"  # Optional: for OpenRouter dashboard
-    }
-    data = {
-        "model": model, 
-        "messages": [{"role": "user", "content": prompt}], 
-        "stream": True,
-        "route": "fallback"  # Enable automatic fallback to similar models
-    }
+def call_openrouter(model, prompt, sources=None):
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    # Add "stream": True to enable streaming
+    data = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True}
     
-    retry_count = 0
-    last_error = None
-    
-    while retry_count < max_retries:
-        try:
-            # Add stream=True to the requests call
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions", 
-                headers=headers, 
-                json=data, 
-                timeout=60,  # Increased timeout to 60 seconds
-                stream=True
-            )
-            response.raise_for_status()
-            
-            # Iterate over the streaming response
-            for line in response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8')
-                    if decoded_line.startswith('data: '):
-                        json_data = decoded_line[6:]
-                        if json_data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(json_data)
-                            if "choices" in chunk and chunk["choices"][0].get("delta", {}).get("content"):
-                                # Yield the text chunk
-                                yield chunk["choices"][0]["delta"]["content"]
-                        except json.JSONDecodeError:
-                            continue # Ignore empty or malformed lines
-            
-            # If we successfully streamed, break out of retry loop
-            return
+    try:
+        # Add stream=True to the requests call
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions", 
+            headers=headers, 
+            json=data, 
+            timeout=30, 
+            stream=True
+        )
+        response.raise_for_status()
         
-        except requests.exceptions.HTTPError as e:
-            last_error = e
-            if e.response.status_code == 401:
-                err_msg = f"**LLM Error (401 Unauthorized):** Invalid API Key. Please check your OPENROUTER_API_KEY in secrets."
-                st.error(err_msg)
-                yield err_msg
-                return
-            elif e.response.status_code == 402:
-                err_msg = f"**LLM Error (402 Payment Required):** Your OpenRouter account has insufficient credits. Please add credits at https://openrouter.ai/credits"
-                st.error(err_msg)
-                yield err_msg
-                return
-            elif e.response.status_code == 429:
-                err_msg = f"**LLM Error (429 Rate Limited):** Too many requests. Waiting 5 seconds before retry {retry_count + 1}/{max_retries}..."
-                st.warning(err_msg)
-                time.sleep(5)
-                retry_count += 1
-                continue
-            elif e.response.status_code == 502:
-                retry_count += 1
-                if retry_count < max_retries:
-                    wait_time = retry_count * 2  # Progressive backoff: 2s, 4s, 6s
-                    err_msg = f"**LLM Error (502 Bad Gateway):** OpenRouter server temporarily unavailable. Retrying in {wait_time} seconds... (Attempt {retry_count}/{max_retries})"
-                    st.warning(err_msg)
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    err_msg = f"**LLM Error (502 Bad Gateway):** OpenRouter servers are currently unavailable after {max_retries} attempts. Please try again in a few minutes or switch to a different model."
-                    st.error(err_msg)
-                    yield err_msg
-                    return
-            elif e.response.status_code == 503:
-                retry_count += 1
-                if retry_count < max_retries:
-                    wait_time = retry_count * 3  # Progressive backoff
-                    err_msg = f"**LLM Error (503 Service Unavailable):** Model is temporarily unavailable. Retrying in {wait_time} seconds... (Attempt {retry_count}/{max_retries})"
-                    st.warning(err_msg)
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    err_msg = f"**LLM Error (503):** The selected model '{model}' is currently unavailable. Try switching to a different model from the sidebar."
-                    st.error(err_msg)
-                    yield err_msg
-                    return
-            else:
-                err_msg = f"**HTTP Error {e.response.status_code}:** {str(e)}"
-                st.error(err_msg)
-                yield err_msg
-                return
-                
-        except requests.exceptions.Timeout:
-            retry_count += 1
-            if retry_count < max_retries:
-                err_msg = f"**Timeout Error:** Request timed out. Retrying... (Attempt {retry_count}/{max_retries})"
-                st.warning(err_msg)
-                time.sleep(2)
-                continue
-            else:
-                err_msg = f"**Timeout Error:** Request timed out after {max_retries} attempts. The model may be slow or overloaded. Try a faster model like 'openai/gpt-5-mini'."
-                st.error(err_msg)
-                yield err_msg
-                return
-                
-        except requests.exceptions.ConnectionError as e:
-            retry_count += 1
-            if retry_count < max_retries:
-                err_msg = f"**Connection Error:** Cannot reach OpenRouter servers. Retrying... (Attempt {retry_count}/{max_retries})"
-                st.warning(err_msg)
-                time.sleep(3)
-                continue
-            else:
-                err_msg = f"**Connection Error:** Cannot connect to OpenRouter. Please check your internet connection."
-                st.error(err_msg)
-                yield err_msg
-                return
-                
-        except Exception as e:
-            err_msg = f"**Unexpected Error:** {str(e)}"
+        # Iterate over the streaming response
+        for line in response.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                if decoded_line.startswith('data: '):
+                    json_data = decoded_line[6:]
+                    if json_data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(json_data)
+                        if "choices" in chunk and chunk["choices"][0].get("delta", {}).get("content"):
+                            # Yield the text chunk
+                            yield chunk["choices"][0]["delta"]["content"]
+                    except json.JSONDecodeError:
+                        continue # Ignore empty or malformed lines
+    
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            err_msg = f"**LLM Error (401 Unauthorized):** Cannot connect. Please fix your API Key. {e}"
             st.error(err_msg)
             yield err_msg
-            return
-    
-    # If we exhausted all retries
-    if last_error:
-        err_msg = f"**Failed after {max_retries} attempts.** Last error: {str(last_error)}"
+        else:
+            err_msg = f"HTTP Error connecting to LLM: {e}"
+            st.error(err_msg)
+            yield err_msg
+    except requests.exceptions.Timeout:
+        err_msg = "Error: Request timed out."
+        st.error(err_msg)
+        yield err_msg
+    except Exception as e:
+        err_msg = f"Error connecting to LLM: {e}"
         st.error(err_msg)
         yield err_msg
 
@@ -1141,7 +1054,7 @@ with st.sidebar:
     st.session_state.selected_model = st.selectbox("Select Model", [
         "openai/gpt-5", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro",
         "x-ai/grok-code-fast-1", "google/gemini-2.5-flash", 
-        "deepseek/deepseek-r1-distill-llama-70b:free", "openai/gpt-5-mini"
+        "deepseek/deepseek-r1-distill-llama-70b:free", "openai/gpt-5-mini", "tngtech/deepseek-r1t2-chimera:free"
     ], index=0)
     
     st.success(f"Knowledge Base loaded with {folder_index.ntotal} chunks", icon="✅")
@@ -1419,4 +1332,3 @@ if prompt := st.chat_input("Ask a legal question (e.g., 'What is the doctrine of
         st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
     
     st.rerun()
-
