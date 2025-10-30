@@ -13,13 +13,14 @@ import nltk
 from nltk.corpus import stopwords
 import string
 import base64
+import json
 from datetime import datetime
 from io import BytesIO
 
 # --- PDF Dependencies ---
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer 
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_LEFT
@@ -62,7 +63,7 @@ except LookupError:
 # CONFIG & API KEY
 # ==========================
 
-# --- IMPROVED API KEY HANDLING ---
+# --- STREAMLIT SECRETS CONFIGURATION ---
 OPENROUTER_API_KEY = None
 try:
     OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY")
@@ -76,10 +77,10 @@ BASE_URL = "https://openrouter.ai/api/v1"
 INDEX_FILE = "faiss_advanced_index.bin"
 METADATA_FILE = "metadata.pkl"
 
-# Stop the app if the key is not available
+# Check if API key is configured
 if not OPENROUTER_API_KEY:
-    st.error("OPENROUTER_API_KEY not found. Please set it in your Streamlit secrets or environment variables.")
-    st.info("To set it in Streamlit Community Cloud, go to 'Settings' > 'Secrets' and add `OPENROUTER_API_KEY = 'your_key_here'`")
+    st.error("⚠️ OPENROUTER_API_KEY not found. Please configure it in Streamlit secrets.")
+    st.info("Add your API key to `.streamlit/secrets.toml` with: `OPENROUTER_API_KEY = \"your-key-here\"`")
     st.stop()
 
 # ==========================
@@ -341,32 +342,59 @@ def construct_final_prompt(question, rag_summary, uploaded_context_summary):
     """
     return final_prompt.strip()
 
+
 # ==========================
-# LLM API CALL
+# LLM API CALL (STREAMING)
 # ==========================
 def call_openrouter(model, prompt, sources=None):
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
-    data = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    # Add "stream": True to enable streaming
+    data = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True}
+    
     try:
-        response = requests.post(f"https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
+        # Add stream=True to the requests call
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions", 
+            headers=headers, 
+            json=data, 
+            timeout=30, 
+            stream=True
+        )
         response.raise_for_status()
-        result = response.json()
-        answer = result["choices"][0]["message"]["content"]
-        tokens_used = result.get("usage", {}).get("total_tokens", 0)
-        return answer, tokens_used
+        
+        # Iterate over the streaming response
+        for line in response.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                if decoded_line.startswith('data: '):
+                    json_data = decoded_line[6:]
+                    if json_data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(json_data)
+                        if "choices" in chunk and chunk["choices"][0].get("delta", {}).get("content"):
+                            # Yield the text chunk
+                            yield chunk["choices"][0]["delta"]["content"]
+                    except json.JSONDecodeError:
+                        continue # Ignore empty or malformed lines
     
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            st.error("Authentication Failed (401). Please check the OPENROUTER_API_KEY.")
-            return f"**LLM Error (401 Unauthorized):** Cannot connect. Please fix your API Key. {e}", 0
-        st.error(f"HTTP Error connecting to LLM: {e}")
-        return f"Error connecting to LLM: {e}", 0
+            err_msg = f"**LLM Error (401 Unauthorized):** Cannot connect. Please fix your API Key. {e}"
+            st.error(err_msg)
+            yield err_msg
+        else:
+            err_msg = f"HTTP Error connecting to LLM: {e}"
+            st.error(err_msg)
+            yield err_msg
     except requests.exceptions.Timeout:
-        st.error("Request timed out. Please try again.")
-        return "Error: Request timed out.", 0
+        err_msg = "Error: Request timed out."
+        st.error(err_msg)
+        yield err_msg
     except Exception as e:
-        st.error(f"Error connecting to LLM: {e}")
-        return f"Error connecting to LLM: {e}", 0
+        err_msg = f"Error connecting to LLM: {e}"
+        st.error(err_msg)
+        yield err_msg
 
 def generate_suggested_prompts(last_question, last_answer):
     """Generates 3 follow-up prompts."""
@@ -385,7 +413,11 @@ def generate_suggested_prompts(last_question, last_answer):
     **Last Answer:**
     {truncate_text(last_answer, 300)}
     """
-    answer, tokens = call_openrouter("openai/gpt-5-mini", suggestion_prompt)
+    # Note: This call is still non-streaming, which is fine for short suggestions.
+    # We need to collect the stream into a full answer
+    stream = call_openrouter("openai/gpt-5-mini", suggestion_prompt)
+    answer = "".join(stream)
+    
     if "Error" in answer:
         return []
     prompts = [
@@ -579,7 +611,6 @@ if folder_index is None:
 # Initialize session state 
 if "messages" not in st.session_state: st.session_state.messages = []
 if "uploaded_pdfs_data" not in st.session_state: st.session_state.uploaded_pdfs_data = None
-if "tokens_used" not in st.session_state: st.session_state.tokens_used = 0
 if "chat_sessions" not in st.session_state: st.session_state.chat_sessions = {}
 if "active_chat" not in st.session_state: st.session_state.active_chat = None
 if "selected_model" not in st.session_state: st.session_state.selected_model = "openai/gpt-5"
@@ -587,6 +618,9 @@ if "keyword_found" not in st.session_state: st.session_state.keyword_found = Tru
 if "suggested_prompts" not in st.session_state: st.session_state.suggested_prompts = []
 if "pending_prompts" not in st.session_state: st.session_state.pending_prompts = []
 if "processing" not in st.session_state: st.session_state.processing = False
+if "active_stream" not in st.session_state: st.session_state.active_stream = None
+if "stream_sources" not in st.session_state: st.session_state.stream_sources = []
+if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
 
 
 # Inject Custom CSS
@@ -915,6 +949,7 @@ with st.sidebar:
         st.session_state.keyword_found = True
         st.session_state.suggested_prompts = []
         st.session_state.pending_prompts = []
+        st.session_state.active_stream = None
         st.rerun()
 
     st.write("**Your Chats:**")
@@ -933,6 +968,7 @@ with st.sidebar:
                     st.session_state.keyword_found = True
                     st.session_state.suggested_prompts = []
                     st.session_state.pending_prompts = []
+                    st.session_state.active_stream = None
                     st.rerun()
             with chat_col2:
                 with st.popover("⋮"):
@@ -948,6 +984,7 @@ with st.sidebar:
                             st.session_state.keyword_found = True
                             st.session_state.suggested_prompts = []
                             st.session_state.pending_prompts = []
+                            st.session_state.active_stream = None
                         st.rerun()
     st.markdown("---")
 
@@ -986,6 +1023,7 @@ with st.sidebar:
         st.session_state.keyword_found = True
         st.session_state.suggested_prompts = []
         st.session_state.pending_prompts = []
+        st.session_state.active_stream = None
         st.rerun()
     st.markdown("---")
     
@@ -1016,7 +1054,7 @@ with st.sidebar:
     st.session_state.selected_model = st.selectbox("Select Model", [
         "openai/gpt-5", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro",
         "x-ai/grok-code-fast-1", "google/gemini-2.5-flash", 
-        "google/gemini-2.5-flash-lite", "openai/gpt-5-mini", "tngtech/deepseek-r1t2-chimera:free"
+        "deepseek/deepseek-r1-distill-llama-70b:free", "openai/gpt-5-mini", "tngtech/deepseek-r1t2-chimera:free"
     ], index=0)
     
     st.success(f"Knowledge Base loaded with {folder_index.ntotal} chunks", icon="✅")
@@ -1028,7 +1066,7 @@ with st.sidebar:
             st.info(f"{len(uploaded_pdfs)} PDF(s) loaded. They will be used as context.")
         elif st.session_state.uploaded_pdfs_data:
             st.session_state.uploaded_pdfs_data = None
-        
+            
     st.markdown("---")
 
 # ==========================
@@ -1067,6 +1105,7 @@ keyword_terms = st.session_state.get("keyword_highlight_input", "")
 
 chat_container = st.container()
 with chat_container:
+    # Display chat history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             content = message["content"]
@@ -1078,7 +1117,7 @@ with chat_container:
                     unsafe_allow_html=True
                 )
 
-            # --- RENDER HIGHLIGHTS (Updated to work with keyword changes) ---
+            # Render highlights
             if keyword_terms and keyword_terms.strip():
                 highlighted_content, _ = highlight_with_style(content, keyword_terms)
                 st.markdown(highlighted_content, unsafe_allow_html=True)
@@ -1092,18 +1131,58 @@ with chat_container:
                         st.markdown(f"**Source:** `{source['source']}`")
                         st.markdown(f"**Snippet (3 Lines):** {llm_summary}")
     
-    if st.session_state.tokens_used > 0:
-        st.markdown(f"---")
-        st.caption(f"Total tokens used in this session: **{st.session_state.tokens_used}**")
+    # Handle active stream
+    if st.session_state.active_stream:
+        with st.chat_message("assistant"):
+            # Stream the response live into the chat bubble
+            full_response = st.write_stream(st.session_state.active_stream)
+        
+        # Stream is finished, now clean up
+        
+        # 1. Add the completed message to session state
+        assistant_message = {
+            "role": "assistant",
+            "content": full_response,
+            "sources": st.session_state.stream_sources
+        }
+        st.session_state.messages.append(assistant_message)
+        
+        # 2. Clear the stream states
+        st.session_state.active_stream = None
+        st.session_state.stream_sources = []
+        
+        # 3. Generate follow-up suggestions
+        try:
+            suggested_prompts = generate_suggested_prompts(st.session_state.last_user_prompt, full_response)
+            st.session_state.suggested_prompts = suggested_prompts
+        except Exception as e:
+            st.session_state.suggested_prompts = []
+
+        # 4. Auto-name the chat (if needed)
+        if st.session_state.active_chat:
+            current_chat = st.session_state.chat_sessions[st.session_state.active_chat]
+            if current_chat["name"] == "New Chat":
+                first_user_msg = st.session_state.last_user_prompt
+                if first_user_msg:
+                    new_chat_name = first_user_msg[:40].strip()
+                    if len(first_user_msg) > 40:
+                        new_chat_name += "..."
+                    st.session_state.chat_sessions[st.session_state.active_chat]["name"] = new_chat_name
+            
+            # 5. Save messages to chat session
+            st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
+
+        # 6. Rerun to display the new suggestions and clear the stream
+        st.rerun()
 
 # ==================================
 # OPTIMIZED PROMPT WORKFLOW
 # ==================================
 
 def handle_selected_prompt(selected_prompt):
-    """Optimized version with better state management and auto-naming"""
+    """Optimized version: sets up the stream generator in session state."""
     st.session_state.pending_prompts = []
-    st.session_state.processing = True
+    st.session_state.processing = True # Show processing indicator while RAG runs
 
     # RAG from Database
     all_sources = []
@@ -1134,45 +1213,17 @@ def handle_selected_prompt(selected_prompt):
     # Construct Final Prompt
     final_prompt = construct_final_prompt(selected_prompt, final_rag_context, uploaded_context_summary)
     
-    # LLM Call for Answer
-    llm_answer, tokens_used = call_openrouter(st.session_state.selected_model, final_prompt, list(unique_sources.values()))
-    st.session_state.tokens_used += tokens_used
-
-    # LLM Call for Follow-up Suggestions (async-style, non-blocking)
-    try:
-        suggested_prompts = generate_suggested_prompts(selected_prompt, llm_answer)
-        st.session_state.suggested_prompts = suggested_prompts
-    except Exception as e:
-        st.session_state.suggested_prompts = []
-
-    # Add assistant message to state
-    assistant_message = {
-        "role": "assistant",
-        "content": llm_answer,
-        "sources": list(unique_sources.values())
-    }
-    st.session_state.messages.append(assistant_message)
+    # Create the generator and store it
+    st.session_state.active_stream = call_openrouter(
+        st.session_state.selected_model, 
+        final_prompt, 
+        list(unique_sources.values())
+    )
+    # Store the sources to be added to the message *after* streaming
+    st.session_state.stream_sources = list(unique_sources.values())
+    st.session_state.last_user_prompt = selected_prompt
     
-    # AUTO-NAME THE CHAT if it's still "New Chat"
-    if st.session_state.active_chat:
-        current_chat = st.session_state.chat_sessions[st.session_state.active_chat]
-        if current_chat["name"] == "New Chat":
-            # Get the first user message (the original question)
-            first_user_msg = None
-            for msg in st.session_state.messages:
-                if msg["role"] == "user":
-                    first_user_msg = msg["content"]
-                    break
-            
-            if first_user_msg:
-                new_chat_name = first_user_msg[:40].strip()
-                if len(first_user_msg) > 40:
-                    new_chat_name += "..."
-                st.session_state.chat_sessions[st.session_state.active_chat]["name"] = new_chat_name
-        
-        # Save messages to chat session
-        st.session_state.chat_sessions[st.session_state.active_chat]["messages"] = st.session_state.messages
-    
+    # We are no longer "processing" (waiting for RAG), we are about to stream.
     st.session_state.processing = False
 
 
@@ -1227,13 +1278,10 @@ elif st.session_state.suggested_prompts:
     st.markdown("Click on any question below to continue your research:")
     
     for i, prompt_text in enumerate(st.session_state.suggested_prompts):
-        # Create a container for better formatting
         suggestion_container = st.container()
         with suggestion_container:
-            # Use custom HTML styling for the button wrapper
             st.markdown(f'<div class="suggestion-container">', unsafe_allow_html=True)
             
-            # Streamlit button with better configuration
             button_label = f"🔍 {prompt_text}"
             if st.button(
                 button_label, 
@@ -1263,7 +1311,7 @@ elif st.session_state.suggested_prompts:
             st.markdown('</div>', unsafe_allow_html=True)
 
 # --- Streamlit Chat Input ---
-chat_input_disabled = bool(st.session_state.pending_prompts) or st.session_state.processing
+chat_input_disabled = bool(st.session_state.pending_prompts) or st.session_state.processing or bool(st.session_state.active_stream)
 
 if prompt := st.chat_input("Ask a legal question (e.g., 'What is the doctrine of Res Gestae?')", disabled=chat_input_disabled):
     st.session_state.suggested_prompts = []
